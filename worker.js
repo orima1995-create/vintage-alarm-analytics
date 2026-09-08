@@ -13,6 +13,10 @@ export default {
       return analyticsResponse(url, env);
     }
 
+    if (url.pathname === "/api/x-preview") {
+      return xPreviewResponse(url);
+    }
+
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return htmlResponse(DASHBOARD_HTML);
     }
@@ -47,6 +51,71 @@ function requireBasicAuth(request, env) {
       "X-Robots-Tag": "noindex, nofollow, noarchive",
     },
   });
+}
+
+async function xPreviewResponse(url) {
+  try {
+    const raw = url.searchParams.get("url") || "";
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (!["x.com", "www.x.com", "twitter.com", "www.twitter.com"].includes(host)) {
+      throw new Error("X post URL only.");
+    }
+
+    const match = parsed.pathname.match(/^\/([^/]+)\/status\/(\d{1,19})/);
+    if (!match) throw new Error("Post URL format could not be recognized.");
+
+    const postId = match[2];
+    const canonicalUrl = `https://x.com/${match[1]}/status/${postId}`;
+    const endpoint = new URL("https://publish.x.com/oembed");
+    endpoint.searchParams.set("url", canonicalUrl);
+    endpoint.searchParams.set("omit_script", "true");
+    endpoint.searchParams.set("dnt", "true");
+    endpoint.searchParams.set("lang", "ja");
+
+    const response = await fetch(endpoint.toString(), {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`X oEmbed HTTP ${response.status}`);
+
+    const data = await response.json();
+    const text = extractPostText(data.html || "");
+
+    return jsonResponse({
+      url: canonicalUrl,
+      postId,
+      authorName: data.author_name || "",
+      authorUrl: data.author_url || "",
+      text,
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: error instanceof Error ? error.message : String(error) },
+      400,
+    );
+  }
+}
+
+function extractPostText(html) {
+  const match = String(html).match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+  if (!match) return "";
+  return decodeHtmlText(
+    match[1]
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+  ).trim();
+}
+
+function decodeHtmlText(value) {
+  return String(value)
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
 }
 
 async function analyticsResponse(url, env) {
@@ -767,11 +836,12 @@ function campaignPanel(entryFlows,internalFlows){
   ];
   const funnel='<div class="campaign-grid">'+steps.map(([label,val])=>'<div class="funnel-step"><span class="section-title">'+label+'</span><strong>'+esc(val)+'</strong></div>').join("")+'</div>'+
     '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。</div>';
-  const list='<div class="campaign-list">'+campaigns.slice(0,5).map((x,i)=>'<div class="campaign-item"><span><strong>'+esc(x.label)+'</strong> · '+esc(x.postedAt||"時刻未登録")+' · '+esc(x.targetPath||"/")+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
+  const list='<div class="campaign-list">'+campaigns.slice(0,5).map((x,i)=>'<div class="campaign-item"><span><strong>'+esc(x.label)+'</strong> · '+esc(x.postedAt||"時刻未登録")+' · '+esc(x.targetPath||"/")+(x.authorName?' · '+esc(x.authorName):'')+(x.postUrl?'<span class="path">'+esc(x.postUrl)+'</span>':'')+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
   return funnel+campaignFormHtml()+list;
 }
 function campaignFormHtml(){
   return '<form class="campaign-form" id="campaignForm">'+
+    '<input name="postUrl" type="url" placeholder="X post URL（貼ると自動読込）">'+
     '<input name="label" placeholder="投稿名" required>'+
     '<input name="postedAt" type="datetime-local" required>'+
     '<input name="targetPath" placeholder="/cyma-time-o-vox/" required>'+
@@ -783,12 +853,40 @@ function campaignFormHtml(){
 }
 function bindCampaignUi(){
   const form=document.getElementById("campaignForm");
-  if(form)form.addEventListener("submit",event=>{
+  if(form){
+    const postUrl=form.elements.postUrl;
+    if(postUrl)postUrl.addEventListener("change",async()=>{
+      const value=String(postUrl.value||"").trim();
+      if(!value)return;
+      postUrl.dataset.state="loading";
+      try{
+        const res=await fetch('/api/x-preview?url='+encodeURIComponent(value),{cache:"no-store"});
+        const preview=await res.json();
+        if(!res.ok||preview.error)throw new Error(preview.error||("HTTP "+res.status));
+        postUrl.value=preview.url||value;
+        postUrl.dataset.postId=preview.postId||"";
+        postUrl.dataset.authorName=preview.authorName||"";
+        postUrl.dataset.postText=preview.text||"";
+        if(!form.elements.label.value){
+          const base=(preview.text||"").replace(/\s+/g," ").trim();
+          form.elements.label.value=base?base.slice(0,42):(preview.authorName||"X POST");
+        }
+        postUrl.dataset.state="ready";
+      }catch(err){
+        postUrl.dataset.state="error";
+        alert("X投稿の読込に失敗: "+err.message);
+      }
+    });
+    form.addEventListener("submit",event=>{
     event.preventDefault();
     const fd=new FormData(form);
     const items=getCampaigns();
     items.push({
       label:String(fd.get("label")||"X POST"),
+      postUrl:String(fd.get("postUrl")||""),
+      postId:String(form.elements.postUrl?.dataset.postId||""),
+      authorName:String(form.elements.postUrl?.dataset.authorName||""),
+      postText:String(form.elements.postUrl?.dataset.postText||""),
       postedAt:String(fd.get("postedAt")||""),
       targetPath:normalizeTargetPath(fd.get("targetPath")),
       impressions:Number(fd.get("impressions")||0),
@@ -798,7 +896,8 @@ function bindCampaignUi(){
     });
     saveCampaigns(items);
     render(window.__vaLastData);
-  });
+    });
+  }
   document.querySelectorAll("[data-campaign-delete]").forEach(btn=>btn.addEventListener("click",()=>{
     const items=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
     items.splice(Number(btn.dataset.campaignDelete),1);
