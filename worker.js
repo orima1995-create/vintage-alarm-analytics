@@ -119,7 +119,7 @@ query VintageAlarmAnalytics(
       ) {
         count
         sum { visits }
-        dimensions { refererHost }
+        dimensions { refererHost refererPath }
       }
       countries: rumPageloadEventsAdaptiveGroups(
         filter: $filter
@@ -194,6 +194,7 @@ function normalizePeriod(data) {
 
   const rawReferers = (account.referers || []).map((row) => ({
     host: row?.dimensions?.refererHost || "",
+    path: row?.dimensions?.refererPath || "",
     pageviews: row?.count || 0,
     visits: row?.sum?.visits || 0,
   }));
@@ -437,7 +438,7 @@ function render(data){
     '</tbody></table></section>'+
     '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS / PV</div></div>'+rows(c.channels,10)+'</section>'+
     '<section class="card referrers"><div class="section-head"><div class="section-title">REFERRERS</div><span>raw host</span></div><table><thead><tr><th>HOST</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
-      c.referrers.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.host||"(Direct)")+'</strong></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
+      c.referrers.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.host||"(Direct)")+'</strong>'+(x.path?'<span class="path">'+esc(x.path)+'</span>':'')+'</td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">COUNTRIES</div></div>'+rows(c.countries,10)+'</section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">DEVICES</div></div>'+rows(c.devices,10)+'</section>'+
