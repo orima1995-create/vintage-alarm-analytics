@@ -1,0 +1,26 @@
+{
+  "name": "vintage-alarm-analytics",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "check": "node --check worker.js",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CF_API_TOKEN": {
+        "description": "Cloudflare API token with Account > Account Analytics > Read."
+      },
+      "CF_ACCOUNT_ID": {
+        "description": "Cloudflare Account ID for the Web Analytics account."
+      },
+      "DASHBOARD_PASSWORD": {
+        "description": "Password used to protect the private analytics dashboard."
+      }
+    }
+  }
+}

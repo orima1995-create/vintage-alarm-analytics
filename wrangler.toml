@@ -1,0 +1,16 @@
+name = "vintage-alarm-analytics"
+main = "worker.js"
+compatibility_date = "2026-09-08"
+workers_dev = true
+
+[vars]
+REQUEST_HOST = "orima1995-create.github.io"
+
+# Secrets are intentionally not committed.
+# Set them after deployment:
+#   npx wrangler secret put CF_API_TOKEN
+#   npx wrangler secret put CF_ACCOUNT_ID
+#   npx wrangler secret put DASHBOARD_PASSWORD
+# Optional:
+#   npx wrangler secret put CF_SITE_TAG
+#   npx wrangler secret put DASHBOARD_USER
