@@ -70,6 +70,8 @@ async function analyticsResponse(url, env) {
       generatedAt: now.toISOString(),
       windowKey: windowSpec.key,
       windowLabel: windowSpec.label,
+      windowStart: currentStart.toISOString(),
+      windowEnd: now.toISOString(),
       host,
       current: normalizePeriod(current),
       previous: normalizePeriod(previous),
