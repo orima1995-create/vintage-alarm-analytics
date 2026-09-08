@@ -308,7 +308,10 @@ function buildFlows(rows) {
 
 function buildChannels(rows) {
   const channels = {
-    "X / SNS": { pageviews: 0, visits: 0 },
+    "X": { pageviews: 0, visits: 0 },
+    "Instagram": { pageviews: 0, visits: 0 },
+    "Facebook": { pageviews: 0, visits: 0 },
+    "Other SNS": { pageviews: 0, visits: 0 },
     "Organic Search": { pageviews: 0, visits: 0 },
     "Direct / Unknown": { pageviews: 0, visits: 0 },
     "AI Assistant": { pageviews: 0, visits: 0 },
@@ -336,11 +339,18 @@ function classifyReferrer(host) {
     value.endsWith(".x.com") ||
     value === "twitter.com" ||
     value.endsWith(".twitter.com") ||
-    value === "t.co" ||
-    value.includes("instagram.com") ||
-    value.includes("facebook.com") ||
-    value.includes("threads.net")
-  ) return "X / SNS";
+    value === "t.co"
+  ) return "X";
+
+  if (value.includes("instagram.com")) return "Instagram";
+  if (value.includes("facebook.com")) return "Facebook";
+
+  if (
+    value.includes("threads.net") ||
+    value.includes("whatsapp.com") ||
+    value.includes("line.me") ||
+    value.includes("linkedin.com")
+  ) return "Other SNS";
 
   if (
     value.includes("google.") ||
@@ -495,8 +505,8 @@ function render(data){
   const c=data.current,p=data.previous;
   document.getElementById("period").textContent=data.windowLabel || windowKey;
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
-  const xNow=c.channels.find(x=>x.name==="X / SNS")?.visits||0;
-  const xPrev=p.channels.find(x=>x.name==="X / SNS")?.visits||0;
+  const xNow=c.channels.find(x=>x.name==="X")?.visits||0;
+  const xPrev=p.channels.find(x=>x.name==="X")?.visits||0;
   const searchNow=c.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const entryFlows=c.flows.filter(x=>x.visits>0 && x.channel!=="Internal Navigation");
@@ -517,7 +527,7 @@ function render(data){
   '<div class="grid">'+audit+
     '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
-    '<section class="card kpi"><div class="label">X / SNS VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
+    '<section class="card kpi"><div class="label">X VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
     '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
