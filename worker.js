@@ -54,10 +54,10 @@ async function analyticsResponse(url, env) {
     requireEnv(env, "CF_API_TOKEN");
     requireEnv(env, "CF_ACCOUNT_ID");
 
-    const days = normalizeRange(url.searchParams.get("days"));
+    const windowSpec = normalizeWindow(url.searchParams.get("window"));
     const now = new Date();
-    const currentStart = new Date(now.getTime() - days * 86400000);
-    const previousStart = new Date(now.getTime() - days * 2 * 86400000);
+    const currentStart = new Date(now.getTime() - windowSpec.ms);
+    const previousStart = new Date(now.getTime() - windowSpec.ms * 2);
     const host = env.REQUEST_HOST || DEFAULT_HOST;
 
     const [current, previous] = await Promise.all([
@@ -67,7 +67,8 @@ async function analyticsResponse(url, env) {
 
     const payload = {
       generatedAt: now.toISOString(),
-      rangeDays: days,
+      windowKey: windowSpec.key,
+      windowLabel: windowSpec.label,
       host,
       current: normalizePeriod(current),
       previous: normalizePeriod(previous),
@@ -86,9 +87,15 @@ function requireEnv(env, key) {
   if (!env[key]) throw new Error(`${key} is not configured.`);
 }
 
-function normalizeRange(value) {
-  const days = Number(value || 7);
-  return [1, 7, 30].includes(days) ? days : 7;
+function normalizeWindow(value) {
+  const windows = {
+    "1h": { key: "1h", label: "直近1時間", ms: 60 * 60 * 1000 },
+    "3h": { key: "3h", label: "直近3時間", ms: 3 * 60 * 60 * 1000 },
+    "24h": { key: "24h", label: "直近24時間", ms: 24 * 60 * 60 * 1000 },
+    "7d": { key: "7d", label: "直近7日", ms: 7 * 24 * 60 * 60 * 1000 },
+    "30d": { key: "30d", label: "直近30日", ms: 30 * 24 * 60 * 60 * 1000 },
+  };
+  return windows[value] || windows["7d"];
 }
 
 async function fetchPeriod(env, host, start, end) {
@@ -120,6 +127,15 @@ query VintageAlarmAnalytics(
         count
         sum { visits }
         dimensions { refererHost refererPath }
+      }
+      flows: rumPageloadEventsAdaptiveGroups(
+        filter: $filter
+        limit: 200
+        orderBy: [count_DESC]
+      ) {
+        count
+        sum { visits }
+        dimensions { requestPath refererHost refererPath }
       }
       countries: rumPageloadEventsAdaptiveGroups(
         filter: $filter
@@ -185,16 +201,28 @@ function normalizePeriod(data) {
   const account = data?.viewer?.accounts?.[0] || {};
   const total = account.total?.[0] || { count: 0, sum: { visits: 0 } };
 
-  const pages = (account.pages || []).map((row) => ({
-    path: cleanPath(row?.dimensions?.requestPath || "/"),
-    name: friendlyPageName(row?.dimensions?.requestPath || "/"),
-    pageviews: row?.count || 0,
-    visits: row?.sum?.visits || 0,
-  }));
+  const pages = (account.pages || []).map((row) => {
+    const meta = pageMeta(row?.dimensions?.requestPath || "/");
+    return {
+      path: meta.path,
+      name: meta.name,
+      mapped: meta.mapped,
+      pageviews: row?.count || 0,
+      visits: row?.sum?.visits || 0,
+    };
+  });
 
   const rawReferers = (account.referers || []).map((row) => ({
     host: row?.dimensions?.refererHost || "",
     path: row?.dimensions?.refererPath || "",
+    pageviews: row?.count || 0,
+    visits: row?.sum?.visits || 0,
+  }));
+
+  const rawFlows = (account.flows || []).map((row) => ({
+    requestPath: row?.dimensions?.requestPath || "/",
+    refererHost: row?.dimensions?.refererHost || "",
+    refererPath: row?.dimensions?.refererPath || "",
     pageviews: row?.count || 0,
     visits: row?.sum?.visits || 0,
   }));
@@ -204,6 +232,7 @@ function normalizePeriod(data) {
     visits: total.sum?.visits || 0,
     pages,
     referrers: rawReferers,
+    flows: buildFlows(rawFlows),
     channels: buildChannels(rawReferers),
     countries: (account.countries || []).map((row) => ({
       name: friendlyCountry(row?.dimensions?.countryName || "Unknown"),
@@ -216,26 +245,65 @@ function normalizePeriod(data) {
   };
 }
 
+const PAGE_NAMES = Object.freeze({
+  "/": "TOP",
+  "/history/": "HISTORY",
+  "/owners-notes/": "OWNER'S NOTES",
+  "/pierce-duofon/": "Pierce Duofon",
+  "/cyma-time-o-vox/": "Cyma Time-O-Vox",
+  "/cyma-time-o-vox/owners-note/": "Cyma OWNER'S NOTE",
+  "/history/smartwatch/": "Smartwatch / HISTORY",
+});
+
 function cleanPath(path) {
-  if (!path) return "/";
-  let out = path;
+  let out = String(path || "/").split(/[?#]/)[0];
+  try { out = decodeURIComponent(out); } catch {}
   if (out.startsWith(BASE_PATH)) out = out.slice(BASE_PATH.length) || "/";
   if (!out.startsWith("/")) out = "/" + out;
+  out = out.replace(/\/{2,}/g, "/");
+  if (out !== "/" && !out.endsWith("/") && !out.split("/").pop().includes(".")) out += "/";
   return out;
 }
 
-function friendlyPageName(path) {
+function pageMeta(path) {
   const cleaned = cleanPath(path);
-  const map = {
-    "/": "TOP",
-    "/history/": "HISTORY",
-    "/owners-notes/": "OWNER'S NOTES",
-    "/pierce-duofon/": "Pierce Duofon",
-    "/cyma-time-o-vox/": "Cyma Time-O-Vox",
-    "/cyma-time-o-vox/owners-note/": "Cyma OWNER'S NOTE",
-    "/history/smartwatch/": "Smartwatch / HISTORY",
+  return {
+    path: cleaned,
+    name: PAGE_NAMES[cleaned] || cleaned,
+    mapped: Boolean(PAGE_NAMES[cleaned]),
   };
-  return map[cleaned] || cleaned;
+}
+
+function friendlyPageName(path) {
+  return pageMeta(path).name;
+}
+
+function buildFlows(rows) {
+  return rows.map((row) => {
+    const destination = pageMeta(row.requestPath);
+    const channel = classifyReferrer(row.refererHost);
+    let sourceName = channel;
+
+    if (channel === "Internal Navigation") {
+      sourceName = friendlyPageName(row.refererPath || "/");
+    } else if (channel === "Direct / Unknown") {
+      sourceName = "Direct";
+    } else if (row.refererPath) {
+      sourceName = channel + " · " + row.refererPath;
+    }
+
+    return {
+      sourceName,
+      sourceHost: row.refererHost,
+      sourcePath: row.refererPath,
+      destinationName: destination.name,
+      destinationPath: destination.path,
+      destinationMapped: destination.mapped,
+      channel,
+      pageviews: row.pageviews,
+      visits: row.visits,
+    };
+  }).sort((a, b) => (b.visits - a.visits) || (b.pageviews - a.pageviews));
 }
 
 function buildChannels(rows) {
@@ -374,6 +442,8 @@ th,td{text-align:left;padding:9px 6px;border-top:1px solid #ded7cc;vertical-alig
 th{font-size:10px;color:var(--muted);font-weight:600}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .path{display:block;color:var(--muted);font-size:10px;margin-top:2px;overflow-wrap:anywhere}
+.flag{display:inline-block;margin-left:6px;padding:2px 5px;border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:.08em}
+.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid #ded7cc;font-size:12px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
 .bar{height:100%;background:var(--ink)}
@@ -387,9 +457,11 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 <header>
 <div><div class="eyebrow">PRIVATE / CLOUDFLARE WEB ANALYTICS</div><h1>VINTAGE ALARM ANALYTICS</h1></div>
 <div class="actions">
-<button data-days="1">24H</button>
-<button data-days="7" class="active">7D</button>
-<button data-days="30">30D</button>
+<button data-window="1h">1H</button>
+<button data-window="3h">3H</button>
+<button data-window="24h">24H</button>
+<button data-window="7d" class="active">7D</button>
+<button data-window="30d">30D</button>
 <button class="refresh" id="refresh">REFRESH</button>
 </div>
 </header>
@@ -398,7 +470,7 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 <footer>Cloudflare Web Analytics / RUM。Page views と Visits は別定義。ページ表の ENTRY VISITS は、そのページが外部流入・直接流入の入口になった回数。内部遷移は0になり得る。検索露出は Search Console と分離して扱う。</footer>
 </main>
 <script>
-let days=7;
+let windowKey="7d";
 const esc=(v)=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}[c]));
 const n=(v)=>new Intl.NumberFormat("ja-JP").format(Number(v||0));
 const pct=(current,previous)=>{
@@ -421,22 +493,38 @@ function rows(items,max=8){
 }
 function render(data){
   const c=data.current,p=data.previous;
-  document.getElementById("period").textContent=days===1?"直近24時間":'直近 '+days+' 日';
+  document.getElementById("period").textContent=data.windowLabel || windowKey;
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
   const xNow=c.channels.find(x=>x.name==="X / SNS")?.visits||0;
   const xPrev=p.channels.find(x=>x.name==="X / SNS")?.visits||0;
   const searchNow=c.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
+  const entryFlows=c.flows.filter(x=>x.visits>0 && x.channel!=="Internal Navigation");
+  const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation");
+  const unmapped=c.pages.filter(x=>!x.mapped);
+  const audit=unmapped.length
+    ? '<section class="card audit"><strong>MAPPING AUDIT</strong> · 未登録Path '+unmapped.map(x=>esc(x.path)).join(", ")+'</section>'
+    : '';
+  const flowRows=(items,internal=false)=>items.slice(0,20).map(x=>
+    '<tr><td><strong>'+esc(x.sourceName)+'</strong>'+
+    (x.sourceHost?'<span class="path">'+esc(x.sourceHost+(x.sourcePath||""))+'</span>':'')+
+    '</td><td>→</td><td><strong>'+esc(x.destinationName)+'</strong>'+
+    (!x.destinationMapped?'<span class="flag">UNMAPPED</span>':'')+
+    '<span class="path">'+esc(x.destinationPath)+'</span></td>'+
+    '<td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>'
+  ).join("");
   document.getElementById("content").innerHTML=
-  '<div class="grid">'+
+  '<div class="grid">'+audit+
     '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
     '<section class="card kpi"><div class="label">X / SNS VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
     '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
-      c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
+      c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
     '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS / PV</div></div>'+rows(c.channels,10)+'</section>'+
+    '<section class="card flow"><div class="section-head"><div class="section-title">ENTRY SOURCE → PAGE</div><span>同一行で取得</span></div><table><thead><tr><th>SOURCE</th><th></th><th>DESTINATION</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+flowRows(entryFlows)+'</tbody></table></section>'+
+    '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div><table><thead><tr><th>FROM</th><th></th><th>TO</th><th class="num">PV</th><th class="num">VISITS</th></tr></thead><tbody>'+flowRows(internalFlows,true)+'</tbody></table></section>'+
     '<section class="card referrers"><div class="section-head"><div class="section-title">REFERRERS</div><span>raw host</span></div><table><thead><tr><th>HOST</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.referrers.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.host||"(Direct)")+'</strong>'+(x.path?'<span class="path">'+esc(x.path)+'</span>':'')+'</td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
@@ -447,7 +535,7 @@ function render(data){
 async function load(){
   document.getElementById("content").innerHTML='<div class="card">Loading Cloudflare Web Analytics…</div>';
   try{
-    const res=await fetch('/api/analytics?days='+days,{cache:"no-store"});
+    const res=await fetch('/api/analytics?window='+encodeURIComponent(windowKey),{cache:"no-store"});
     const data=await res.json();
     if(!res.ok||data.error)throw new Error(data.error||('HTTP '+res.status));
     render(data);
@@ -455,9 +543,9 @@ async function load(){
     document.getElementById("content").innerHTML='<div class="error">'+esc(err.message)+'</div>';
   }
 }
-document.querySelectorAll("[data-days]").forEach(btn=>btn.addEventListener("click",()=>{
-  days=Number(btn.dataset.days);
-  document.querySelectorAll("[data-days]").forEach(x=>x.classList.toggle("active",x===btn));
+document.querySelectorAll("[data-window]").forEach(btn=>btn.addEventListener("click",()=>{
+  windowKey=btn.dataset.window;
+  document.querySelectorAll("[data-window]").forEach(x=>x.classList.toggle("active",x===btn));
   load();
 }));
 document.getElementById("refresh").addEventListener("click",load);
