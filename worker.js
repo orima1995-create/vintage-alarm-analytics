@@ -135,7 +135,7 @@ query VintageAlarmAnalytics(
       ) {
         count
         sum { visits }
-        dimensions { requestPath refererHost refererPath }
+        dimensions { requestPath refererHost refererPath countryName deviceType }
       }
       countries: rumPageloadEventsAdaptiveGroups(
         filter: $filter
@@ -223,6 +223,8 @@ function normalizePeriod(data) {
     requestPath: row?.dimensions?.requestPath || "/",
     refererHost: row?.dimensions?.refererHost || "",
     refererPath: row?.dimensions?.refererPath || "",
+    country: row?.dimensions?.countryName || "Unknown",
+    device: row?.dimensions?.deviceType || "Unknown",
     pageviews: row?.count || 0,
     visits: row?.sum?.visits || 0,
   }));
@@ -300,6 +302,8 @@ function buildFlows(rows) {
       destinationPath: destination.path,
       destinationMapped: destination.mapped,
       channel,
+      country: friendlyCountry(row.country),
+      device: friendlyDevice(row.device),
       pageviews: row.pageviews,
       visits: row.visits,
     };
@@ -518,6 +522,7 @@ function render(data){
   const flowRows=(items,internal=false)=>items.slice(0,20).map(x=>
     '<tr><td><strong>'+esc(x.sourceName)+'</strong>'+
     (x.sourceHost?'<span class="path">'+esc(x.sourceHost+(x.sourcePath||""))+'</span>':'')+
+    '<span class="path">'+esc(x.country)+' · '+esc(x.device)+'</span>'+
     '</td><td>→</td><td><strong>'+esc(x.destinationName)+'</strong>'+
     (!x.destinationMapped?'<span class="flag">UNMAPPED</span>':'')+
     '<span class="path">'+esc(x.destinationPath)+'</span></td>'+
