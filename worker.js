@@ -60,9 +60,10 @@ async function analyticsResponse(url, env) {
     const previousStart = new Date(now.getTime() - windowSpec.ms * 2);
     const host = env.REQUEST_HOST || DEFAULT_HOST;
 
-    const [current, previous] = await Promise.all([
+    const [current, previous, trendResult] = await Promise.all([
       fetchPeriod(env, host, currentStart, now),
       fetchPeriod(env, host, previousStart, currentStart),
+      fetchTrend(env, host, currentStart, now, windowSpec),
     ]);
 
     const payload = {
@@ -72,6 +73,9 @@ async function analyticsResponse(url, env) {
       host,
       current: normalizePeriod(current),
       previous: normalizePeriod(previous),
+      trend: trendResult.points,
+      trendBucket: trendResult.bucketField,
+      trendWarning: trendResult.warning || null,
     };
 
     return jsonResponse(payload);
@@ -89,11 +93,36 @@ function requireEnv(env, key) {
 
 function normalizeWindow(value) {
   const windows = {
-    "1h": { key: "1h", label: "直近1時間", ms: 60 * 60 * 1000 },
-    "3h": { key: "3h", label: "直近3時間", ms: 3 * 60 * 60 * 1000 },
-    "24h": { key: "24h", label: "直近24時間", ms: 24 * 60 * 60 * 1000 },
-    "7d": { key: "7d", label: "直近7日", ms: 7 * 24 * 60 * 60 * 1000 },
-    "30d": { key: "30d", label: "直近30日", ms: 30 * 24 * 60 * 60 * 1000 },
+    "1h": {
+      key: "1h",
+      label: "直近1時間",
+      ms: 60 * 60 * 1000,
+      bucketCandidates: ["datetimeFiveMinutes", "datetimeFifteenMinutes", "datetimeHour"],
+    },
+    "3h": {
+      key: "3h",
+      label: "直近3時間",
+      ms: 3 * 60 * 60 * 1000,
+      bucketCandidates: ["datetimeFifteenMinutes", "datetimeFiveMinutes", "datetimeHour"],
+    },
+    "24h": {
+      key: "24h",
+      label: "直近24時間",
+      ms: 24 * 60 * 60 * 1000,
+      bucketCandidates: ["datetimeHour", "datetimeFifteenMinutes"],
+    },
+    "7d": {
+      key: "7d",
+      label: "直近7日",
+      ms: 7 * 24 * 60 * 60 * 1000,
+      bucketCandidates: ["date", "datetimeHour"],
+    },
+    "30d": {
+      key: "30d",
+      label: "直近30日",
+      ms: 30 * 24 * 60 * 60 * 1000,
+      bucketCandidates: ["date", "datetimeHour"],
+    },
   };
   return windows[value] || windows["7d"];
 }
@@ -171,6 +200,121 @@ query VintageAlarmAnalytics(
       ],
     },
   });
+}
+
+async function fetchTrend(env, host, start, end, windowSpec) {
+  let lastError = null;
+
+  for (const bucketField of windowSpec.bucketCandidates) {
+    const orderBy = bucketField + "_ASC";
+    const query = `
+query VintageAlarmTrend(
+  $accountTag: string!
+  $filter: AccountRumPageloadEventsAdaptiveGroupsFilter_InputObject!
+) {
+  viewer {
+    accounts(filter: { accountTag: $accountTag }) {
+      totals: rumPageloadEventsAdaptiveGroups(
+        filter: $filter
+        limit: 2000
+        orderBy: [${orderBy}]
+      ) {
+        count
+        sum { visits }
+        dimensions { bucket: ${bucketField} }
+      }
+      acquisition: rumPageloadEventsAdaptiveGroups(
+        filter: $filter
+        limit: 5000
+        orderBy: [${orderBy}]
+      ) {
+        count
+        sum { visits }
+        dimensions { bucket: ${bucketField} refererHost }
+      }
+    }
+  }
+}
+`;
+
+    try {
+      const data = await cloudflareGraphQL(env, query, {
+        accountTag: env.CF_ACCOUNT_ID,
+        filter: {
+          AND: [
+            {
+              datetime_geq: start.toISOString(),
+              datetime_leq: end.toISOString(),
+            },
+            { requestHost: host },
+            { bot: 0 },
+          ],
+        },
+      });
+
+      return {
+        bucketField,
+        points: normalizeTrend(data),
+        warning: null,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  return {
+    bucketField: null,
+    points: [],
+    warning: lastError instanceof Error ? lastError.message : "Trend data unavailable.",
+  };
+}
+
+function normalizeTrend(data) {
+  const account = data?.viewer?.accounts?.[0] || {};
+  const points = new Map();
+
+  const ensure = (bucket) => {
+    const key = String(bucket || "");
+    if (!points.has(key)) {
+      points.set(key, {
+        bucket: key,
+        pageviews: 0,
+        visits: 0,
+        x: 0,
+        instagram: 0,
+        facebook: 0,
+        otherSns: 0,
+        search: 0,
+        direct: 0,
+        ai: 0,
+        other: 0,
+      });
+    }
+    return points.get(key);
+  };
+
+  for (const row of account.totals || []) {
+    const point = ensure(row?.dimensions?.bucket);
+    point.pageviews += row?.count || 0;
+    point.visits += row?.sum?.visits || 0;
+  }
+
+  for (const row of account.acquisition || []) {
+    const point = ensure(row?.dimensions?.bucket);
+    const channel = classifyReferrer(row?.dimensions?.refererHost || "");
+    const visits = row?.sum?.visits || 0;
+
+    if (channel === "X") point.x += visits;
+    else if (channel === "Instagram") point.instagram += visits;
+    else if (channel === "Facebook") point.facebook += visits;
+    else if (channel === "Other SNS") point.otherSns += visits;
+    else if (channel === "Organic Search") point.search += visits;
+    else if (channel === "Direct / Unknown") point.direct += visits;
+    else if (channel === "AI Assistant") point.ai += visits;
+    else if (channel === "Other Referral") point.other += visits;
+  }
+
+  return [...points.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
 }
 
 async function cloudflareGraphQL(env, query, variables) {
