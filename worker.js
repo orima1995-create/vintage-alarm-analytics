@@ -665,7 +665,7 @@ function bucketLabel(value){
     :{month:"numeric",day:"numeric",timeZone:"Asia/Tokyo"};
   return new Intl.DateTimeFormat("ja-JP",opts).format(new Date(t));
 }
-function lineChart(points,series){
+function lineChart(points,series,campaigns=[]){
   if(!points?.length)return '<div class="muted">時系列データなし</div>';
   const w=900,h=250,l=42,r=18,t=18,b=34,iw=w-l-r,ih=h-t-b;
   const start=new Date(window.__vaWindowStart||points[0].bucket).getTime();
@@ -690,8 +690,15 @@ function lineChart(points,series){
   }).join("");
   const tickIdx=[0,Math.floor((points.length-1)/4),Math.floor((points.length-1)/2),Math.floor((points.length-1)*3/4),points.length-1].filter((v,i,a)=>v>=0&&a.indexOf(v)===i);
   const ticks=tickIdx.map(i=>'<text x="'+xFor(points[i].bucket,i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="#706d67">'+esc(bucketLabel(points[i].bucket))+'</text>').join("");
+  const markers=campaigns.map(item=>{
+    if(!item.postedAt)return "";
+    const mt=new Date(item.postedAt).getTime();
+    if(!Number.isFinite(mt)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||mt<start||mt>end)return "";
+    const x=l+((mt-start)/(end-start))*iw;
+    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="#8d2c23" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="#8d2c23">'+esc(item.label||"X POST")+'</text>';
+  }).join("");
   const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
-  return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+ticks+'</svg></div>'+legend;
+  return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+markers+ticks+'</svg></div>'+legend;
 }
 function entryBars(pages){
   const items=[...pages].sort((a,b)=>(b.visits-a.visits)||(b.pageviews-a.pageviews)).slice(0,8);
