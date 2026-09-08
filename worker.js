@@ -732,6 +732,78 @@ function flowVisual(items){
   if(!list.length)return '<div class="muted">内部遷移データなし</div>';
   return '<div class="flow-viz">'+list.map(x=>'<div class="flow-viz-row"><strong>'+esc(x.sourceName)+'</strong><span>→</span><strong>'+esc(x.destinationName)+'</strong><div class="flow-track"><div class="flow-fill" style="width:'+((x.pageviews/max)*100)+'%"></div></div><span class="flow-count">'+n(x.pageviews)+'</span></div>').join("")+'</div>';
 }
+const CAMPAIGN_KEY="vaCampaigns";
+function getCampaigns(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(CAMPAIGN_KEY)||"[]");
+    return Array.isArray(parsed)?parsed:[];
+  }catch{return[]}
+}
+function saveCampaigns(items){
+  localStorage.setItem(CAMPAIGN_KEY,JSON.stringify(items));
+}
+function normalizeTargetPath(value){
+  let out=String(value||"/").trim();
+  if(!out.startsWith("/"))out="/"+out;
+  if(out!=="/"&&!out.endsWith("/"))out+="/";
+  return out;
+}
+function campaignPanel(entryFlows){
+  const campaigns=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
+  const active=campaigns[0]||null;
+  if(!active){
+    return '<div class="muted">投稿を登録すると、折れ線に投稿時刻を重ねてファネル比較できる。</div>'+campaignFormHtml();
+  }
+  const xEntries=entryFlows.filter(x=>x.channel==="X").reduce((s,x)=>s+x.visits,0);
+  const targetEntries=entryFlows.filter(x=>x.channel==="X"&&x.destinationPath===active.targetPath).reduce((s,x)=>s+x.visits,0);
+  const steps=[
+    ["IMPRESSIONS",active.impressions],
+    ["LINK CLICKS",active.linkClicks],
+    ["X ENTRIES*",xEntries],
+    ["TARGET ENTRIES*",targetEntries],
+    ["NEXT PAGE*","—"]
+  ];
+  const funnel='<div class="campaign-grid">'+steps.map(([label,val])=>'<div class="funnel-step"><span class="section-title">'+label+'</span><strong>'+esc(val)+'</strong></div>').join("")+'</div>'+
+    '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。</div>';
+  const list='<div class="campaign-list">'+campaigns.slice(0,5).map((x,i)=>'<div class="campaign-item"><span><strong>'+esc(x.label)+'</strong> · '+esc(x.postedAt||"時刻未登録")+' · '+esc(x.targetPath||"/")+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
+  return funnel+campaignFormHtml()+list;
+}
+function campaignFormHtml(){
+  return '<form class="campaign-form" id="campaignForm">'+
+    '<input name="label" placeholder="投稿名" required>'+
+    '<input name="postedAt" type="datetime-local" required>'+
+    '<input name="targetPath" placeholder="/cyma-time-o-vox/" required>'+
+    '<input name="impressions" type="number" min="0" placeholder="imp">'+
+    '<input name="engagements" type="number" min="0" placeholder="eng">'+
+    '<input name="details" type="number" min="0" placeholder="detail">'+
+    '<input name="linkClicks" type="number" min="0" placeholder="click">'+
+    '<button type="submit">ADD</button></form>';
+}
+function bindCampaignUi(){
+  const form=document.getElementById("campaignForm");
+  if(form)form.addEventListener("submit",event=>{
+    event.preventDefault();
+    const fd=new FormData(form);
+    const items=getCampaigns();
+    items.push({
+      label:String(fd.get("label")||"X POST"),
+      postedAt:String(fd.get("postedAt")||""),
+      targetPath:normalizeTargetPath(fd.get("targetPath")),
+      impressions:Number(fd.get("impressions")||0),
+      engagements:Number(fd.get("engagements")||0),
+      details:Number(fd.get("details")||0),
+      linkClicks:Number(fd.get("linkClicks")||0)
+    });
+    saveCampaigns(items);
+    render(window.__vaLastData);
+  });
+  document.querySelectorAll("[data-campaign-delete]").forEach(btn=>btn.addEventListener("click",()=>{
+    const items=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
+    items.splice(Number(btn.dataset.campaignDelete),1);
+    saveCampaigns(items);
+    render(window.__vaLastData);
+  }));
+}
 function render(data){
   window.__vaLastData=data;
   window.__vaWindowStart=data.windowStart;
