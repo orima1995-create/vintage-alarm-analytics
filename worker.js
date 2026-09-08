@@ -615,7 +615,7 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 <body>
 <main>
 <header>
-<div><div class="eyebrow">PRIVATE / CLOUDFLARE WEB ANALYTICS</div><h1>VINTAGE ALARM ANALYTICS</h1></div>
+<div><div class="eyebrow">PRIVATE / MARKETING DASHBOARD V2</div><h1>VINTAGE ALARM ANALYTICS</h1></div>
 <div class="actions">
 <button data-window="1h">1H</button>
 <button data-window="3h">3H</button>
