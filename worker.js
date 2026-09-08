@@ -444,6 +444,7 @@ function buildFlows(rows) {
       sourceName,
       sourceHost: row.refererHost,
       sourcePath: row.refererPath,
+      sourceCleanPath: channel === "Internal Navigation" ? cleanPath(row.refererPath || "/") : row.refererPath,
       destinationName: destination.name,
       destinationPath: destination.path,
       destinationMapped: destination.mapped,
@@ -748,7 +749,7 @@ function normalizeTargetPath(value){
   if(out!=="/"&&!out.endsWith("/"))out+="/";
   return out;
 }
-function campaignPanel(entryFlows){
+function campaignPanel(entryFlows,internalFlows){
   const campaigns=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
   const active=campaigns[0]||null;
   if(!active){
@@ -756,12 +757,13 @@ function campaignPanel(entryFlows){
   }
   const xEntries=entryFlows.filter(x=>x.channel==="X").reduce((s,x)=>s+x.visits,0);
   const targetEntries=entryFlows.filter(x=>x.channel==="X"&&x.destinationPath===active.targetPath).reduce((s,x)=>s+x.visits,0);
+  const nextPages=internalFlows.filter(x=>x.sourceCleanPath===active.targetPath).reduce((s,x)=>s+x.pageviews,0);
   const steps=[
     ["IMPRESSIONS",active.impressions],
     ["LINK CLICKS",active.linkClicks],
     ["X ENTRIES*",xEntries],
     ["TARGET ENTRIES*",targetEntries],
-    ["NEXT PAGE*","—"]
+    ["NEXT PAGE*",nextPages]
   ];
   const funnel='<div class="campaign-grid">'+steps.map(([label,val])=>'<div class="funnel-step"><span class="section-title">'+label+'</span><strong>'+esc(val)+'</strong></div>').join("")+'</div>'+
     '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。</div>';
@@ -851,7 +853,7 @@ function render(data){
     '<section class="card chart-half"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
     '<section class="card chart-half"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div>'+flowVisual(internalFlows)+'</section>'+
-    '<section class="card campaign"><div class="section-head"><div class="section-title">CAMPAIGN FUNNEL</div><span>投稿ログはこのブラウザだけに保存</span></div>'+campaignPanel(entryFlows)+'</section>'+
+    '<section class="card campaign"><div class="section-head"><div class="section-title">CAMPAIGN FUNNEL</div><span>投稿ログはこのブラウザだけに保存</span></div>'+campaignPanel(entryFlows,internalFlows)+'</section>'+
     '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
