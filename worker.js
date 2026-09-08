@@ -205,11 +205,11 @@ function normalizePeriod(data) {
     referrers: rawReferers,
     channels: buildChannels(rawReferers),
     countries: (account.countries || []).map((row) => ({
-      name: row?.dimensions?.countryName || "Unknown",
+      name: friendlyCountry(row?.dimensions?.countryName || "Unknown"),
       pageviews: row?.count || 0,
     })),
     devices: (account.devices || []).map((row) => ({
-      name: row?.dimensions?.deviceType || "Unknown",
+      name: friendlyDevice(row?.dimensions?.deviceType || "Unknown"),
       pageviews: row?.count || 0,
     })),
   };
@@ -244,6 +244,7 @@ function buildChannels(rows) {
     "Direct / Unknown": { pageviews: 0, visits: 0 },
     "AI Assistant": { pageviews: 0, visits: 0 },
     "Other Referral": { pageviews: 0, visits: 0 },
+    "Internal Navigation": { pageviews: 0, visits: 0 },
   };
 
   for (const row of rows) {
@@ -253,14 +254,13 @@ function buildChannels(rows) {
   }
 
   return Object.entries(channels)
-    .map(([name, values]) => ({ name, ...values }))
-    .filter((item) => item.pageviews > 0 || item.visits > 0)
-    .sort((a, b) => b.pageviews - a.pageviews);
+    .map(([name, values]) => ({ name, ...values }));
 }
 
 function classifyReferrer(host) {
   const value = String(host || "").toLowerCase();
   if (!value) return "Direct / Unknown";
+  if (value === DEFAULT_HOST || value.endsWith("." + DEFAULT_HOST)) return "Internal Navigation";
 
   if (
     value === "x.com" ||
@@ -290,6 +290,28 @@ function classifyReferrer(host) {
   ) return "AI Assistant";
 
   return "Other Referral";
+}
+
+function friendlyCountry(value) {
+  const map = {
+    JP: "Japan",
+    IE: "Ireland",
+    US: "United States",
+    DE: "Germany",
+    GB: "United Kingdom",
+    FR: "France",
+    CH: "Switzerland",
+  };
+  return map[value] || value;
+}
+
+function friendlyDevice(value) {
+  const map = {
+    mobile: "Mobile",
+    desktop: "Desktop",
+    tablet: "Tablet",
+  };
+  return map[String(value).toLowerCase()] || value;
 }
 
 function jsonResponse(value, status = 200) {
@@ -344,7 +366,7 @@ button.refresh{border-color:var(--ink)}
 .kpi .value{font-family:Georgia,"Times New Roman",serif;font-size:36px;margin-top:7px}
 .delta{font-size:11px;margin-top:4px;color:var(--muted)}
 .delta.up{color:#315c3d}.delta.down{color:var(--accent)}
-.pages{grid-column:span 7}.channels{grid-column:span 5}.half{grid-column:span 6}
+.pages{grid-column:span 7}.channels{grid-column:span 5}.referrers{grid-column:1/-1}.half{grid-column:span 6}
 .section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{text-align:left;padding:9px 6px;border-top:1px solid #ded7cc;vertical-align:top}
@@ -356,7 +378,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .bar{height:100%;background:var(--ink)}
 .error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
 footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
-@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi{grid-column:span 6}.pages,.channels,.half{grid-column:1/-1}}
+@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi{grid-column:span 6}.pages,.channels,.referrers,.half{grid-column:1/-1}}
 </style>
 </head>
 <body>
@@ -372,7 +394,7 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 </header>
 <div class="status"><span id="period">Loading…</span><span id="updated"></span></div>
 <div id="content"></div>
-<footer>Cloudflare Web Analytics / RUM。Page views と Visits は別定義。検索露出は Search Console と分離して扱う。</footer>
+<footer>Cloudflare Web Analytics / RUM。Page views と Visits は別定義。ページ表の ENTRY VISITS は、そのページが外部流入・直接流入の入口になった回数。内部遷移は0になり得る。検索露出は Search Console と分離して扱う。</footer>
 </main>
 <script>
 let days=7;
@@ -390,22 +412,33 @@ const delta=(current,previous)=>{
   return '<div class="delta '+cls+'">前期間比 '+sign+d.toFixed(1)+'%</div>';
 };
 function rows(items,max=8){
-  return items.slice(0,max).map(x=>'<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+Math.max(2,(x.pageviews/(items[0]?.pageviews||1))*100)+'%"></div></div></div>').join("");
+  const maxValue=Math.max(1,...items.map(x=>Number(x.pageviews||0)));
+  return items.slice(0,max).map(x=>{
+    const width=x.pageviews?Math.max(2,(x.pageviews/maxValue)*100):0;
+    return '<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+width+'%"></div></div></div>';
+  }).join("");
 }
 function render(data){
   const c=data.current,p=data.previous;
   document.getElementById("period").textContent=days===1?"直近24時間":'直近 '+days+' 日';
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
+  const xNow=c.channels.find(x=>x.name==="X / SNS")?.visits||0;
+  const xPrev=p.channels.find(x=>x.name==="X / SNS")?.visits||0;
+  const searchNow=c.channels.find(x=>x.name==="Organic Search")?.visits||0;
+  const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
   document.getElementById("content").innerHTML=
   '<div class="grid">'+
     '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
-    '<section class="card kpi"><div class="label">WATCH PAGES</div><div class="value">'+n(c.pages.filter(x=>x.name==="Pierce Duofon"||x.name==="Cyma Time-O-Vox").reduce((s,x)=>s+x.pageviews,0))+'</div><div class="delta">Duofon + Cyma</div></section>'+
-    '<section class="card kpi"><div class="label">SEARCH / X</div><div class="value">'+n(c.channels.filter(x=>x.name==="Organic Search"||x.name==="X / SNS").reduce((s,x)=>s+x.pageviews,0))+'</div><div class="delta">流入PV</div></section>'+
-    '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">VISITS</th></tr></thead><tbody>'+
+    '<section class="card kpi"><div class="label">X / SNS VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
+    '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
+    '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
-    '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS</div></div>'+rows(c.channels,10)+'</section>'+
+    '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS / PV</div></div>'+rows(c.channels,10)+'</section>'+
+    '<section class="card referrers"><div class="section-head"><div class="section-title">REFERRERS</div><span>raw host</span></div><table><thead><tr><th>HOST</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
+      c.referrers.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.host||"(Direct)")+'</strong></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
+    '</tbody></table></section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">COUNTRIES</div></div>'+rows(c.countries,10)+'</section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">DEVICES</div></div>'+rows(c.devices,10)+'</section>'+
   '</div>';
