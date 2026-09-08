@@ -651,6 +651,80 @@ function rows(items,max=8){
     return '<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+width+'%"></div></div></div>';
   }).join("");
 }
+const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
+function bucketTime(value){
+  if(!value)return NaN;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(value))return new Date(value+"T00:00:00Z").getTime();
+  return new Date(value).getTime();
+}
+function bucketLabel(value){
+  const t=bucketTime(value);
+  if(!Number.isFinite(t))return value;
+  const opts=(windowKey==="1h"||windowKey==="3h"||windowKey==="24h")
+    ?{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Tokyo"}
+    :{month:"numeric",day:"numeric",timeZone:"Asia/Tokyo"};
+  return new Intl.DateTimeFormat("ja-JP",opts).format(new Date(t));
+}
+function lineChart(points,series){
+  if(!points?.length)return '<div class="muted">時系列データなし</div>';
+  const w=900,h=250,l=42,r=18,t=18,b=34,iw=w-l-r,ih=h-t-b;
+  const start=new Date(window.__vaWindowStart||points[0].bucket).getTime();
+  const end=new Date(window.__vaWindowEnd||points[points.length-1].bucket).getTime();
+  const values=points.flatMap(p=>series.map(s=>Number(p[s.key]||0)));
+  const max=Math.max(1,...values);
+  const xFor=(bucket,index)=>{
+    const bt=bucketTime(bucket);
+    if(Number.isFinite(bt)&&Number.isFinite(start)&&Number.isFinite(end)&&end>start){
+      return l+Math.max(0,Math.min(1,(bt-start)/(end-start)))*iw;
+    }
+    return l+(points.length<=1?0:index/(points.length-1))*iw;
+  };
+  const yFor=v=>t+ih-(Number(v||0)/max)*ih;
+  const grid=[0,.25,.5,.75,1].map(q=>{
+    const y=t+ih-q*ih;
+    return '<line x1="'+l+'" y1="'+y+'" x2="'+(w-r)+'" y2="'+y+'" stroke="#ded7cc" stroke-width="1"/><text x="'+(l-8)+'" y="'+(y+4)+'" text-anchor="end" font-size="9" fill="#706d67">'+Math.round(max*q)+'</text>';
+  }).join("");
+  const lines=series.map(s=>{
+    const pts=points.map((p,i)=>xFor(p.bucket,i)+','+yFor(p[s.key])).join(" ");
+    return '<polyline fill="none" stroke="'+s.color+'" stroke-width="2.2" points="'+pts+'"/>';
+  }).join("");
+  const tickIdx=[0,Math.floor((points.length-1)/4),Math.floor((points.length-1)/2),Math.floor((points.length-1)*3/4),points.length-1].filter((v,i,a)=>v>=0&&a.indexOf(v)===i);
+  const ticks=tickIdx.map(i=>'<text x="'+xFor(points[i].bucket,i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="#706d67">'+esc(bucketLabel(points[i].bucket))+'</text>').join("");
+  const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
+  return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+ticks+'</svg></div>'+legend;
+}
+function entryBars(pages){
+  const items=[...pages].sort((a,b)=>(b.visits-a.visits)||(b.pageviews-a.pageviews)).slice(0,8);
+  const max=Math.max(1,...items.map(x=>x.visits));
+  return items.map(x=>'<div class="entry-bar"><span><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.path)+'</span></span><div class="entry-track"><div class="entry-fill" style="width:'+((x.visits/max)*100)+'%"></div></div><strong>'+n(x.visits)+'</strong></div>').join("");
+}
+function channelColor(name){
+  if(name==="X")return COLORS.X;
+  if(name==="Organic Search")return COLORS.Search;
+  if(name==="Direct / Unknown")return COLORS.Direct;
+  if(name==="Instagram"||name==="Facebook"||name==="Other SNS")return COLORS.Meta;
+  if(name==="AI Assistant")return COLORS.AI;
+  return COLORS.Other;
+}
+function trafficMix(channels){
+  const items=channels.filter(x=>x.name!=="Internal Navigation"&&x.visits>0);
+  const total=items.reduce((s,x)=>s+x.visits,0);
+  if(!total)return '<div class="muted">流入データなし</div>';
+  let cursor=0;
+  const stops=items.map(x=>{
+    const start=cursor;
+    cursor+=x.visits/total*100;
+    return channelColor(x.name)+' '+start.toFixed(2)+'% '+cursor.toFixed(2)+'%';
+  });
+  const list=items.map(x=>'<div class="mix-row"><i class="legend-dot" style="background:'+channelColor(x.name)+'"></i><span>'+esc(x.name)+'</span><strong>'+n(x.visits)+' · '+((x.visits/total)*100).toFixed(0)+'%</strong></div>').join("");
+  return '<div class="donut-grid"><div class="donut" style="background:conic-gradient('+stops.join(",")+')"><div class="donut-center">'+n(total)+'</div></div><div class="mix-list">'+list+'</div></div>';
+}
+function flowVisual(items){
+  const list=items.slice(0,10);
+  const max=Math.max(1,...list.map(x=>x.pageviews));
+  if(!list.length)return '<div class="muted">内部遷移データなし</div>';
+  return '<div class="flow-viz">'+list.map(x=>'<div class="flow-viz-row"><strong>'+esc(x.sourceName)+'</strong><span>→</span><strong>'+esc(x.destinationName)+'</strong><div class="flow-track"><div class="flow-fill" style="width:'+((x.pageviews/max)*100)+'%"></div></div><span class="flow-count">'+n(x.pageviews)+'</span></div>').join("")+'</div>';
+}
 function render(data){
   const c=data.current,p=data.previous;
   document.getElementById("period").textContent=data.windowLabel || windowKey;
