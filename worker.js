@@ -726,6 +726,9 @@ function flowVisual(items){
   return '<div class="flow-viz">'+list.map(x=>'<div class="flow-viz-row"><strong>'+esc(x.sourceName)+'</strong><span>→</span><strong>'+esc(x.destinationName)+'</strong><div class="flow-track"><div class="flow-fill" style="width:'+((x.pageviews/max)*100)+'%"></div></div><span class="flow-count">'+n(x.pageviews)+'</span></div>').join("")+'</div>';
 }
 function render(data){
+  window.__vaLastData=data;
+  window.__vaWindowStart=data.windowStart;
+  window.__vaWindowEnd=data.windowEnd;
   const c=data.current,p=data.previous;
   document.getElementById("period").textContent=data.windowLabel || windowKey;
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
@@ -735,6 +738,10 @@ function render(data){
   const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const entryFlows=c.flows.filter(x=>x.visits>0 && x.channel!=="Internal Navigation");
   const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation");
+  const trend=(data.trend||[]).map(x=>({...x,meta:(x.instagram||0)+(x.facebook||0)+(x.otherSns||0)}));
+  const pagesPerVisit=c.visits?c.pageviews/c.visits:0;
+  const watchEntry=c.pages.filter(x=>x.name==="Pierce Duofon"||x.name==="Cyma Time-O-Vox").reduce((s,x)=>s+x.visits,0);
+  const watchShare=c.visits?(watchEntry/c.visits)*100:0;
   const unmapped=c.pages.filter(x=>!x.mapped);
   const audit=unmapped.length
     ? '<section class="card audit"><strong>MAPPING AUDIT</strong> · 未登録Path '+unmapped.map(x=>esc(x.path)).join(", ")+'</section>'
@@ -748,12 +755,22 @@ function render(data){
     '<span class="path">'+esc(x.destinationPath)+'</span></td>'+
     '<td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>'
   ).join("");
+  const lowSample=c.visits<30?'<section class="card low-sample"><strong>LOW SAMPLE</strong><span>'+n(c.visits)+' visits · まだ傾向断定は保留</span></section>':'';
+  const trafficSeries=[{key:"pageviews",label:"Page views",color:COLORS.pageviews},{key:"visits",label:"Visits",color:COLORS.visits}];
+  const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"meta",label:"Meta",color:COLORS.Meta}];
   document.getElementById("content").innerHTML=
-  '<div class="grid">'+audit+
-    '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
+  '<div class="grid">'+audit+lowSample+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
+    '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">X VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
+    '<section class="card kpi"><div class="label">PAGES / VISIT</div><div class="value">'+pagesPerVisit.toFixed(2)+'</div><div class="delta">回遊の粗い指標</div></section>'+
+    '<section class="card kpi"><div class="label">WATCH ENTRY SHARE</div><div class="value">'+watchShare.toFixed(0)+'%</div><div class="delta">'+n(watchEntry)+' watch entries</div></section>'+
+    '<section class="card chart-card"><div class="section-head"><div class="section-title">TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
+    '<section class="card chart-card"><div class="section-head"><div class="section-title">ACQUISITION TREND</div><span>X / Search / Direct / Meta</span></div>'+lineChart(trend,acquisitionSeries)+'</section>'+
+    '<section class="card chart-half"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
+    '<section class="card chart-half"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
+    '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div>'+flowVisual(internalFlows)+'</section>'+
     '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
