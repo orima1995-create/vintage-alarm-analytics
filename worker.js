@@ -73,6 +73,23 @@ async function discoveryResponse(url, env) {
   try {
     const days = normalizeDiscoveryDays(url.searchParams.get("days"));
     const token = await getGscAccessToken(env);
+    const sites = await gscListSites(token);
+    const property = (sites.siteEntry || []).find((entry) => entry.siteUrl === siteUrl) || null;
+
+    if (!property) {
+      return jsonResponse({
+        configured: true,
+        authenticated: true,
+        propertyAccessible: false,
+        siteUrl,
+        accessibleSites: (sites.siteEntry || []).map((entry) => ({
+          siteUrl: entry.siteUrl,
+          permissionLevel: entry.permissionLevel,
+        })),
+        error: "Search Console property is not accessible to the configured service account.",
+      }, 403);
+    }
+
     const ranges = searchConsoleDateRanges(days);
 
     const [
@@ -156,6 +173,9 @@ async function discoveryResponse(url, env) {
 
     return jsonResponse({
       configured: true,
+      authenticated: true,
+      propertyAccessible: true,
+      permissionLevel: property.permissionLevel || "",
       siteUrl,
       days,
       dateRange: ranges.current,
@@ -294,6 +314,17 @@ function base64UrlBytes(bytes) {
     binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function gscListSites(token) {
+  const response = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(`Search Console Sites HTTP ${response.status}: ${googleErrorMessage(payload)}`);
+  }
+  return payload;
 }
 
 async function gscSearchAnalytics(token, siteUrl, body) {
