@@ -74,3 +74,52 @@ Worker内のPAGE_NAMESで管理する。
 - Search Consoleの表示回数 / Click / CTR / QueryとCloudflare訪問データを混同しない。
 - Campaign Funnel内のCloudflare側数値は選択期間の比較値であり、投稿単位の完全帰属ではない。
 - LOW SAMPLE中は数件差を傾向として断定しない。
+
+
+## Search Console Discovery PoC
+
+Search Console is the next upstream layer above Cloudflare traffic.
+
+The dashboard now has a `DISCOVERY / SEARCH CONSOLE` section. When configured, it reads:
+
+- key-page URL Inspection status
+- SEO impressions
+- SEO clicks
+- CTR
+- average position
+- current 28-day vs previous 28-day comparison
+- daily rows
+- top pages / queries
+- searchAppearance as a PoC
+- a conservative diagnostic label
+
+### Required setup
+
+Cloudflare runtime variable:
+
+- `GSC_SITE_URL=https://orima1995-create.github.io/orima1995-creator.github.io/`
+
+Cloudflare secret:
+
+- `GSC_SERVICE_ACCOUNT_JSON`
+
+The service account JSON must never be committed to GitHub.
+
+The service account must have access to the exact Search Console property. The Worker requests only:
+
+`https://www.googleapis.com/auth/webmasters.readonly`
+
+URL Inspection is read-only and checks the version currently known to the Google index; it is not a live indexability test.
+
+### Evidence rule
+
+A zero in Search Console is not automatically an SEO failure.
+
+The dashboard first separates:
+
+1. index status
+2. impressions
+3. clicks / CTR
+4. Cloudflare search entries
+
+Only after those are separated should the diagnosis drill down into page / query / position / device / country.
