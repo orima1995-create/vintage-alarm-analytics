@@ -5,12 +5,11 @@ workers_dev = true
 
 [vars]
 REQUEST_HOST = "orima1995-create.github.io"
+GSC_SITE_URL = "https://orima1995-create.github.io/orima1995-creator.github.io/"
 
 # Secrets are intentionally not committed.
 # Set them after deployment:
 #   npx wrangler secret put CF_API_TOKEN
 #   npx wrangler secret put CF_ACCOUNT_ID
 #   npx wrangler secret put DASHBOARD_PASSWORD
-# Optional:
-#   npx wrangler secret put CF_SITE_TAG
-#   npx wrangler secret put DASHBOARD_USER
+#   npx wrangler secret put GSC_SERVICE_ACCOUNT_JSON
