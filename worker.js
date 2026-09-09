@@ -467,6 +467,7 @@ const PAGE_NAMES = Object.freeze({
   "/": "TOP",
   "/history/": "HISTORY",
   "/owners-notes/": "OWNER'S NOTES",
+  "/basis-alarm/": "Basis Alarm",
   "/pierce-duofon/": "Pierce Duofon",
   "/cyma-time-o-vox/": "Cyma Time-O-Vox",
   "/cyma-time-o-vox/owners-note/": "Cyma OWNER'S NOTE",
