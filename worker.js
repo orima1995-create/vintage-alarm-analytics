@@ -686,7 +686,7 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 <body>
 <main>
 <header>
-<div><div class="eyebrow">PRIVATE / MARKETING DASHBOARD V2</div><h1>VINTAGE ALARM ANALYTICS</h1></div>
+<div><div class="eyebrow">PRIVATE / DISCOVERY DASHBOARD V3</div><h1>VINTAGE ALARM ANALYTICS</h1></div>
 <div class="actions">
 <button data-window="1h">1H</button>
 <button data-window="3h">3H</button>
@@ -1091,7 +1091,9 @@ function discoveryDiagnosis(latest,previous,indexedCount){
 function discoveryTrend(snapshot){
   const file=snapshot?.files?.find(f=>f.dimension==="date");
   if(!file?.rows?.length)return '<div class="muted">日付CSVを同時に読み込むと時系列が出ます。</div>';
-  const points=file.rows.map(r=>({bucket:r.key,impressions:r.impressions,clicks:r.clicks}));
+  const points=file.rows
+    .map(r=>({bucket:r.key,impressions:r.impressions,clicks:r.clicks}))
+    .sort((a,b)=>bucketTime(a.bucket)-bucketTime(b.bucket));
   const series=snapshot.kind==="seo"
     ?[{key:"impressions",label:"Impressions",color:COLORS.Search},{key:"clicks",label:"Clicks",color:COLORS.visits}]
     :[{key:"impressions",label:"Google AI impressions",color:COLORS.AI}];
