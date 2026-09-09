@@ -76,50 +76,48 @@ Worker内のPAGE_NAMESで管理する。
 - LOW SAMPLE中は数件差を傾向として断定しない。
 
 
-## Search Console Discovery PoC
 
-Search Console is the next upstream layer above Cloudflare traffic.
+## Zero-cost SEO / GEO Inbox
 
-The dashboard now has a `DISCOVERY / SEARCH CONSOLE` section. When configured, it reads:
+追加課金経路を作らない方針に変更した。
 
-- key-page URL Inspection status
-- SEO impressions
-- SEO clicks
+Google Cloud / Service Account / Search Console APIは使用しない。
+Search Console本体のExportを入力にして、分析だけをVINTAGE ALARM ANALYTICSで行う。
+
+入力:
+
+- 通常Search Performance CSV
+- Google生成AI Performance CSV
+- URL Inspection結果は主要ページだけ手動記録
+
+ダッシュボード:
+
+- SEO Impressions
+- SEO Clicks
 - CTR
-- average position
-- current 28-day vs previous 28-day comparison
-- daily rows
-- top pages / queries
-- searchAppearance as a PoC
-- a conservative diagnostic label
+- Average Position
+- Google AI Impressions
+- Index Status
+- CSV時系列
+- Page / Query等のドリルダウン
+- 前回Import比較
+- conservative diagnosis
 
-### Required setup
+Search ConsoleでExportする際はCSVを選ぶ。
+複数CSVが出た場合は、展開後にまとめて選択してImportする。
 
-Cloudflare runtime variable:
+ImportデータとIndex Statusは現在ブラウザlocalStorageへ保存する。
+API token、Google Cloud project、Billing accountは不要。
 
-- `GSC_SITE_URL=https://orima1995-create.github.io/orima1995-creator.github.io/`
+### Data interpretation
 
-Cloudflare secret:
+Search ConsoleのChartとTableは集計方法が異なる場合がある。
+全体KPIはDate系CSVを優先し、Page / Queryはドリルダウンとして扱う。
 
-- `GSC_SERVICE_ACCOUNT_JSON`
+Google生成AI Performanceは通常SEOと別Snapshotとして保存する。
+AI ImpressionとAI ReferralとAI Citationを同一指標にしない。
 
-The service account JSON must never be committed to GitHub.
+### Cost rule
 
-The service account must have access to the exact Search Console property. The Worker requests only:
-
-`https://www.googleapis.com/auth/webmasters.readonly`
-
-URL Inspection is read-only and checks the version currently known to the Google index; it is not a live indexability test.
-
-### Evidence rule
-
-A zero in Search Console is not automatically an SEO failure.
-
-The dashboard first separates:
-
-1. index status
-2. impressions
-3. clicks / CTR
-4. Cloudflare search entries
-
-Only after those are separated should the diagnosis drill down into page / query / position / device / country.
+VINTAGE ALARM ANALYTICSの現段階では追加月額0円を優先する。
+Billing accountや有料APIを前提とする実装は採用前に明示的に再評価する。
