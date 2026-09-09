@@ -1,9 +1,6 @@
 const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
 const DEFAULT_HOST = "orima1995-create.github.io";
 const BASE_PATH = "/orima1995-creator.github.io";
-const DEFAULT_GSC_SITE_URL = "https://orima1995-create.github.io/orima1995-creator.github.io/";
-const GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
-let gscTokenCache = null;
 
 export default {
   async fetch(request, env) {
@@ -20,9 +17,6 @@ export default {
       return xPreviewResponse(url);
     }
 
-    if (url.pathname === "/api/discovery") {
-      return discoveryResponse(url, env);
-    }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return htmlResponse(DASHBOARD_HTML);
@@ -58,402 +52,6 @@ function requireBasicAuth(request, env) {
       "X-Robots-Tag": "noindex, nofollow, noarchive",
     },
   });
-}
-
-async function discoveryResponse(url, env) {
-  const siteUrl = env.GSC_SITE_URL || DEFAULT_GSC_SITE_URL;
-  if (!env.GSC_SERVICE_ACCOUNT_JSON) {
-    return jsonResponse({
-      configured: false,
-      siteUrl,
-      reason: "GSC_SERVICE_ACCOUNT_JSON is not configured.",
-    });
-  }
-
-  try {
-    const days = normalizeDiscoveryDays(url.searchParams.get("days"));
-    const token = await getGscAccessToken(env);
-    const sites = await gscListSites(token);
-    const property = (sites.siteEntry || []).find((entry) => entry.siteUrl === siteUrl) || null;
-
-    if (!property) {
-      return jsonResponse({
-        configured: true,
-        authenticated: true,
-        propertyAccessible: false,
-        siteUrl,
-        accessibleSites: (sites.siteEntry || []).map((entry) => ({
-          siteUrl: entry.siteUrl,
-          permissionLevel: entry.permissionLevel,
-        })),
-        error: "Search Console property is not accessible to the configured service account.",
-      }, 403);
-    }
-
-    const ranges = searchConsoleDateRanges(days);
-
-    const [
-      currentSummary,
-      previousSummary,
-      daily,
-      pages,
-      queries,
-      searchAppearance,
-    ] = await Promise.all([
-      gscSearchAnalytics(token, siteUrl, {
-        startDate: ranges.current.start,
-        endDate: ranges.current.end,
-        dataState: "all",
-        rowLimit: 1,
-      }),
-      gscSearchAnalytics(token, siteUrl, {
-        startDate: ranges.previous.start,
-        endDate: ranges.previous.end,
-        dataState: "final",
-        rowLimit: 1,
-      }),
-      gscSearchAnalytics(token, siteUrl, {
-        startDate: ranges.current.start,
-        endDate: ranges.current.end,
-        dataState: "all",
-        dimensions: ["date"],
-        rowLimit: 500,
-      }),
-      gscSearchAnalytics(token, siteUrl, {
-        startDate: ranges.current.start,
-        endDate: ranges.current.end,
-        dataState: "all",
-        dimensions: ["page"],
-        aggregationType: "byPage",
-        rowLimit: 50,
-      }),
-      gscSearchAnalytics(token, siteUrl, {
-        startDate: ranges.current.start,
-        endDate: ranges.current.end,
-        dataState: "all",
-        dimensions: ["query"],
-        rowLimit: 100,
-      }),
-      gscSearchAnalyticsSafe(token, siteUrl, {
-        startDate: ranges.current.start,
-        endDate: ranges.current.end,
-        dataState: "all",
-        dimensions: ["searchAppearance"],
-        rowLimit: 100,
-      }),
-    ]);
-
-    const keyPages = [
-      { name: "TOP", url: siteUrl },
-      { name: "HISTORY", url: new URL("history/", siteUrl).toString() },
-      { name: "OWNER'S NOTES", url: new URL("owners-notes/", siteUrl).toString() },
-      { name: "Pierce Duofon", url: new URL("pierce-duofon/", siteUrl).toString() },
-      { name: "Cyma Time-O-Vox", url: new URL("cyma-time-o-vox/", siteUrl).toString() },
-    ];
-
-    const inspectionSettled = await Promise.allSettled(
-      keyPages.map((page) => gscInspectUrl(token, siteUrl, page))
-    );
-
-    const inspections = inspectionSettled.map((result, index) => {
-      if (result.status === "fulfilled") return result.value;
-      return {
-        ...keyPages[index],
-        verdict: "ERROR",
-        coverageState: "",
-        indexingState: "",
-        pageFetchState: "",
-        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-      };
-    });
-
-    const current = gscSummary(currentSummary);
-    const previous = gscSummary(previousSummary);
-    const indexedCount = inspections.filter((item) => item.verdict === "PASS").length;
-
-    return jsonResponse({
-      configured: true,
-      authenticated: true,
-      propertyAccessible: true,
-      permissionLevel: property.permissionLevel || "",
-      siteUrl,
-      days,
-      dateRange: ranges.current,
-      previousDateRange: ranges.previous,
-      current,
-      previous,
-      daily: gscRows(daily, "date"),
-      pages: gscRows(pages, "page"),
-      queries: gscRows(queries, "query"),
-      searchAppearance: searchAppearance.error
-        ? { rows: [], error: searchAppearance.error }
-        : { rows: gscRows(searchAppearance.data, "searchAppearance"), error: null },
-      inspections,
-      indexedCount,
-      inspectedCount: inspections.length,
-      diagnosis: buildDiscoveryDiagnosis({ current, previous, indexedCount, inspectedCount: inspections.length }),
-      metadata: daily?.metadata || null,
-    });
-  } catch (error) {
-    return jsonResponse({
-      configured: true,
-      siteUrl,
-      error: error instanceof Error ? error.message : String(error),
-    }, 500);
-  }
-}
-
-function normalizeDiscoveryDays(value) {
-  const days = Number(value || 28);
-  return [7, 28, 90].includes(days) ? days : 28;
-}
-
-function searchConsoleDateRanges(days) {
-  const now = new Date();
-  const currentEnd = now;
-  const currentStart = new Date(now.getTime() - (days - 1) * 86400000);
-  const previousEnd = new Date(now.getTime() - days * 86400000);
-  const previousStart = new Date(now.getTime() - (days * 2 - 1) * 86400000);
-  return {
-    current: { start: formatPacificDate(currentStart), end: formatPacificDate(currentEnd) },
-    previous: { start: formatPacificDate(previousStart), end: formatPacificDate(previousEnd) },
-  };
-}
-
-function formatPacificDate(date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${map.year}-${map.month}-${map.day}`;
-}
-
-async function getGscAccessToken(env) {
-  const credentials = JSON.parse(env.GSC_SERVICE_ACCOUNT_JSON);
-  if (!credentials.client_email || !credentials.private_key) {
-    throw new Error("GSC service account JSON is missing client_email or private_key.");
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  if (
-    gscTokenCache &&
-    gscTokenCache.email === credentials.client_email &&
-    gscTokenCache.expiresAt > now + 60
-  ) {
-    return gscTokenCache.accessToken;
-  }
-
-  const header = {
-    alg: "RS256",
-    typ: "JWT",
-    ...(credentials.private_key_id ? { kid: credentials.private_key_id } : {}),
-  };
-  const claims = {
-    iss: credentials.client_email,
-    scope: GSC_SCOPE,
-    aud: "https://oauth2.googleapis.com/token",
-    iat: now,
-    exp: now + 3600,
-  };
-  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
-  const key = await importGooglePrivateKey(credentials.private_key);
-  const signature = await crypto.subtle.sign(
-    { name: "RSASSA-PKCS1-v1_5" },
-    key,
-    new TextEncoder().encode(unsigned),
-  );
-  const assertion = `${unsigned}.${base64UrlBytes(new Uint8Array(signature))}`;
-
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok || !payload.access_token) {
-    throw new Error(`Google OAuth failed: ${payload.error_description || payload.error || response.status}`);
-  }
-
-  gscTokenCache = {
-    email: credentials.client_email,
-    accessToken: payload.access_token,
-    expiresAt: now + Number(payload.expires_in || 3600),
-  };
-  return payload.access_token;
-}
-
-async function importGooglePrivateKey(pem) {
-  const base64 = String(pem)
-    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
-    .replace(/-----END PRIVATE KEY-----/g, "")
-    .replace(/\s+/g, "");
-  const binary = atob(base64);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return crypto.subtle.importKey(
-    "pkcs8",
-    bytes.buffer,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-}
-
-function base64UrlJson(value) {
-  return base64UrlBytes(new TextEncoder().encode(JSON.stringify(value)));
-}
-
-function base64UrlBytes(bytes) {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-async function gscListSites(token) {
-  const response = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(`Search Console Sites HTTP ${response.status}: ${googleErrorMessage(payload)}`);
-  }
-  return payload;
-}
-
-async function gscSearchAnalytics(token, siteUrl, body) {
-  const response = await fetch(
-    `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    },
-  );
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(`Search Console Analytics HTTP ${response.status}: ${googleErrorMessage(payload)}`);
-  }
-  return payload;
-}
-
-async function gscSearchAnalyticsSafe(token, siteUrl, body) {
-  try {
-    return { data: await gscSearchAnalytics(token, siteUrl, body), error: null };
-  } catch (error) {
-    return { data: null, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-async function gscInspectUrl(token, siteUrl, page) {
-  const response = await fetch(
-    "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inspectionUrl: page.url,
-        siteUrl,
-        languageCode: "ja-JP",
-      }),
-    },
-  );
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(`URL Inspection HTTP ${response.status}: ${googleErrorMessage(payload)}`);
-  }
-  const status = payload?.inspectionResult?.indexStatusResult || {};
-  return {
-    ...page,
-    verdict: status.verdict || "UNKNOWN",
-    coverageState: status.coverageState || "",
-    indexingState: status.indexingState || "",
-    pageFetchState: status.pageFetchState || "",
-    robotsTxtState: status.robotsTxtState || "",
-    lastCrawlTime: status.lastCrawlTime || "",
-    googleCanonical: status.googleCanonical || "",
-    userCanonical: status.userCanonical || "",
-  };
-}
-
-function googleErrorMessage(payload) {
-  return payload?.error?.message || payload?.error_description || "Unknown Google API error";
-}
-
-function gscSummary(payload) {
-  const row = payload?.rows?.[0] || {};
-  return {
-    clicks: Number(row.clicks || 0),
-    impressions: Number(row.impressions || 0),
-    ctr: Number(row.ctr || 0),
-    position: Number(row.position || 0),
-  };
-}
-
-function gscRows(payload, dimension) {
-  return (payload?.rows || []).map((row) => ({
-    key: row?.keys?.[0] || "",
-    dimension,
-    clicks: Number(row.clicks || 0),
-    impressions: Number(row.impressions || 0),
-    ctr: Number(row.ctr || 0),
-    position: Number(row.position || 0),
-  }));
-}
-
-function buildDiscoveryDiagnosis({ current, previous, indexedCount, inspectedCount }) {
-  if (indexedCount < inspectedCount) {
-    return {
-      code: "INDEX_COVERAGE_CHECK",
-      label: "INDEX COVERAGE CHECK",
-      detail: `${indexedCount}/${inspectedCount} key pages passed URL Inspection.`,
-    };
-  }
-  if (current.impressions === 0) {
-    return {
-      code: "NO_SEARCH_VISIBILITY_YET",
-      label: "NO SEARCH VISIBILITY YET",
-      detail: "Key pages are indexed, but Search Console reports no impressions in this period.",
-    };
-  }
-
-  const impressionDelta = previous.impressions
-    ? (current.impressions - previous.impressions) / previous.impressions
-    : null;
-  const ctrDelta = previous.ctr ? (current.ctr - previous.ctr) / previous.ctr : null;
-  const positionWorsened = previous.position > 0 && current.position > previous.position + 2;
-
-  if (impressionDelta !== null && impressionDelta < -0.2 && positionWorsened) {
-    return {
-      code: "VISIBILITY_RANKING_SUSPECTED",
-      label: "VISIBILITY / RANKING SUSPECTED",
-      detail: "Impressions fell while average position worsened.",
-    };
-  }
-  if (impressionDelta !== null && impressionDelta > 0.1 && ctrDelta !== null && ctrDelta < -0.2) {
-    return {
-      code: "SNIPPET_INTENT_SUSPECTED",
-      label: "SNIPPET / INTENT SUSPECTED",
-      detail: "Visibility rose but CTR weakened.",
-    };
-  }
-  return {
-    code: "OBSERVE",
-    label: "OBSERVE",
-    detail: "No strong diagnostic pattern yet.",
-  };
 }
 
 async function xPreviewResponse(url) {
@@ -1080,9 +678,9 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid #ded7cc;font-size:12px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
 .bar{height:100%;background:var(--ink)}
-.discovery{margin-bottom:12px}.discovery .grid{margin-top:0}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
+.discovery{margin-bottom:12px}.discovery .grid{margin-top:0}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.inbox{grid-column:1/-1}.inbox-controls{display:grid;grid-template-columns:180px minmax(0,1fr) auto;gap:8px;align-items:center}.inbox-controls select,.inbox-controls input,.inbox-controls button,.index-select{border:1px solid var(--line);background:transparent;color:var(--ink);padding:8px;font:inherit;font-size:11px}.snapshot-list{display:grid;gap:7px;margin-top:10px}.snapshot-item{display:flex;justify-content:space-between;gap:12px;padding-top:7px;border-top:1px solid #ded7cc;font-size:11px}.drop-note{font-size:10px;color:var(--muted);line-height:1.6;margin-top:8px}.diagnostic{border-left:3px solid var(--accent)}.error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
 footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
-@media(max-width:900px){.kpi,.seo-kpi,.health{grid-column:span 4}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half{grid-column:1/-1}.donut-grid{grid-template-columns:1fr}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}}
+@media(max-width:900px){.kpi,.seo-kpi,.health{grid-column:span 4}.inbox-controls{grid-template-columns:1fr}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half{grid-column:1/-1}.donut-grid{grid-template-columns:1fr}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}}
 </style>
 </head>
 <body>
@@ -1371,51 +969,216 @@ function render(data){
   '</div>';
   bindCampaignUi();
 }
-function renderDiscovery(data){
+const DISCOVERY_KEY="vaDiscoverySnapshotsV1";
+const INDEX_KEY="vaIndexStatusV1";
+const KEY_PAGES=[
+  {name:"TOP",path:"/"},
+  {name:"HISTORY",path:"/history/"},
+  {name:"OWNER'S NOTES",path:"/owners-notes/"},
+  {name:"Pierce Duofon",path:"/pierce-duofon/"},
+  {name:"Cyma Time-O-Vox",path:"/cyma-time-o-vox/"}
+];
+
+function getDiscoverySnapshots(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(DISCOVERY_KEY)||"[]");
+    return Array.isArray(parsed)?parsed:[];
+  }catch{return[]}
+}
+function saveDiscoverySnapshots(items){
+  localStorage.setItem(DISCOVERY_KEY,JSON.stringify(items.slice(-20)));
+}
+function getIndexStatus(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(INDEX_KEY)||"{}");
+    return parsed&&typeof parsed==="object"?parsed:{};
+  }catch{return{}}
+}
+function saveIndexStatus(value){
+  localStorage.setItem(INDEX_KEY,JSON.stringify(value));
+}
+function normHeader(value){
+  return String(value||"").trim().toLowerCase().replace(/[\s_\-（）()％%]/g,"");
+}
+function detectMetric(header){
+  const h=normHeader(header);
+  if(["clicks","click","クリック数","クリック"].includes(h))return "clicks";
+  if(["impressions","impression","表示回数","インプレッション数","インプレッション"].includes(h))return "impressions";
+  if(["ctr","クリック率"].includes(h))return "ctr";
+  if(["position","avgposition","averageposition","掲載順位","平均掲載順位"].includes(h))return "position";
+  return null;
+}
+function detectDimension(header){
+  const h=normHeader(header);
+  if(["date","日付"].includes(h))return "date";
+  if(["query","queries","topqueries","クエリ","上位のクエリ"].includes(h))return "query";
+  if(["page","pages","toppages","ページ","上位のページ"].includes(h))return "page";
+  if(["country","countries","国","国名"].includes(h))return "country";
+  if(["device","devices","デバイス"].includes(h))return "device";
+  if(["searchappearance","検索での見え方"].includes(h))return "appearance";
+  return "other";
+}
+function parseNumber(value){
+  const raw=String(value??"").trim().replace(/,/g,"").replace(/[~－—-]$/,"");
+  if(!raw)return 0;
+  if(raw.endsWith("%"))return Number(raw.slice(0,-1))||0;
+  return Number(raw)||0;
+}
+function parseCsv(text){
+  const rows=[]; let row=[]; let cell=""; let quoted=false;
+  const src=String(text||"").replace(/^\uFEFF/,"");
+  for(let i=0;i<src.length;i++){
+    const ch=src[i];
+    if(quoted){
+      if(ch==='"'&&src[i+1]==='"'){cell+='"';i++;}
+      else if(ch==='"'){quoted=false;}
+      else cell+=ch;
+    }else{
+      if(ch==='"')quoted=true;
+      else if(ch===","){row.push(cell);cell="";}
+      else if(ch==="\n"){row.push(cell);rows.push(row);row=[];cell="";}
+      else if(ch!=="\r")cell+=ch;
+    }
+  }
+  if(cell.length||row.length){row.push(cell);rows.push(row);}
+  return rows.filter(r=>r.some(v=>String(v).trim()!==""));
+}
+function normalizeCsvFile(name,text){
+  const matrix=parseCsv(text);
+  if(matrix.length<2)throw new Error(name+": データ行がありません");
+  const headers=matrix[0].map(v=>String(v).trim());
+  const metricCols={};
+  headers.forEach((h,i)=>{const key=detectMetric(h);if(key)metricCols[key]=i;});
+  const dimIndex=headers.findIndex(h=>!detectMetric(h));
+  const dimension=dimIndex>=0?detectDimension(headers[dimIndex]):"other";
+  const rows=matrix.slice(1).map(r=>({
+    key:dimIndex>=0?String(r[dimIndex]||"").trim():"",
+    clicks:metricCols.clicks!==undefined?parseNumber(r[metricCols.clicks]):0,
+    impressions:metricCols.impressions!==undefined?parseNumber(r[metricCols.impressions]):0,
+    ctr:metricCols.ctr!==undefined?parseNumber(r[metricCols.ctr]):0,
+    position:metricCols.position!==undefined?parseNumber(r[metricCols.position]):0
+  })).filter(r=>r.key||r.clicks||r.impressions||r.ctr||r.position);
+  return {name,dimension,headers,rows};
+}
+function snapshotSummary(files,kind){
+  const dateFile=files.find(f=>f.dimension==="date");
+  const source=dateFile||files.find(f=>f.rows.length)||null;
+  if(!source)return {clicks:0,impressions:0,ctr:0,position:0,estimated:true};
+  const impressions=source.rows.reduce((s,r)=>s+r.impressions,0);
+  const clicks=kind==="seo"?source.rows.reduce((s,r)=>s+r.clicks,0):0;
+  const ctr=impressions?clicks/impressions*100:0;
+  const weightedPos=source.rows.reduce((s,r)=>s+(r.position*r.impressions),0);
+  const position=impressions?weightedPos/impressions:0;
+  return {clicks,impressions,ctr,position,estimated:!dateFile};
+}
+function latestSnapshots(kind){
+  return getDiscoverySnapshots().filter(x=>x.kind===kind).sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt)));
+}
+function discoveryDiagnosis(latest,previous,indexedCount){
+  if(indexedCount<KEY_PAGES.length)return {label:"INDEX CHECK",detail:"主要ページのIndex確認が未完了。まず上流を確認。"};
+  if(!latest)return {label:"NO DATA",detail:"Search ConsoleのCSVを読み込むと診断開始。"};
+  if(latest.summary.impressions===0)return {label:"NO VISIBILITY YET",detail:"Index確認済みでもImpressionsが0。露出発生待ちか需要/検索面を確認。"};
+  if(!previous)return {label:"BASELINE",detail:"初回スナップショット。次回Exportから変化判定。"};
+  const impPrev=previous.summary.impressions||0;
+  const impDelta=impPrev?(latest.summary.impressions-impPrev)/impPrev:null;
+  const ctrPrev=previous.summary.ctr||0;
+  const ctrDelta=ctrPrev?(latest.summary.ctr-ctrPrev)/ctrPrev:null;
+  const posBad=previous.summary.position>0&&latest.summary.position>previous.summary.position+2;
+  if(impDelta!==null&&impDelta<-.2&&posBad)return {label:"VISIBILITY / RANKING SUSPECTED",detail:"Impressions低下＋平均掲載順位悪化。Page / Queryへ掘る。"};
+  if(impDelta!==null&&impDelta>.1&&ctrDelta!==null&&ctrDelta<-.2)return {label:"SNIPPET / INTENT SUSPECTED",detail:"露出増に対してCTR低下。Query / Page / title・descriptionを確認。"};
+  return {label:"OBSERVE",detail:"強い異常パターンはまだなし。"};
+}
+function discoveryTrend(snapshot){
+  const file=snapshot?.files?.find(f=>f.dimension==="date");
+  if(!file?.rows?.length)return '<div class="muted">日付CSVを同時に読み込むと時系列が出ます。</div>';
+  const points=file.rows.map(r=>({bucket:r.key,impressions:r.impressions,clicks:r.clicks}));
+  const series=snapshot.kind==="seo"
+    ?[{key:"impressions",label:"Impressions",color:COLORS.Search},{key:"clicks",label:"Clicks",color:COLORS.visits}]
+    :[{key:"impressions",label:"Google AI impressions",color:COLORS.AI}];
+  const prevStart=window.__vaWindowStart,prevEnd=window.__vaWindowEnd;
+  window.__vaWindowStart=points[0]?.bucket;window.__vaWindowEnd=points[points.length-1]?.bucket;
+  const out=lineChart(points,series,[]);
+  window.__vaWindowStart=prevStart;window.__vaWindowEnd=prevEnd;
+  return out;
+}
+function discoveryTopRows(snapshot){
+  if(!snapshot)return "";
+  const priority=["page","query","country","device","appearance"];
+  const file=priority.map(d=>snapshot.files.find(f=>f.dimension===d)).find(Boolean);
+  if(!file)return "";
+  const rows=[...file.rows].sort((a,b)=>b.impressions-a.impressions).slice(0,10);
+  return '<section class="card index-table"><div class="section-head"><div class="section-title">DRILLDOWN / '+esc(file.dimension.toUpperCase())+'</div><span>'+esc(file.name)+'</span></div><table><thead><tr><th>'+esc(file.dimension.toUpperCase())+'</th><th class="num">IMP</th>'+(snapshot.kind==="seo"?'<th class="num">CLICK</th><th class="num">CTR</th><th class="num">POS</th>':'')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr><td>'+esc(r.key)+'</td><td class="num">'+n(r.impressions)+'</td>'+(snapshot.kind==="seo"?'<td class="num">'+n(r.clicks)+'</td><td class="num">'+r.ctr.toFixed(1)+'%</td><td class="num">'+(r.position?r.position.toFixed(1):"—")+'</td>':'')+'</tr>').join("")+
+    '</tbody></table></section>';
+}
+function renderDiscoveryInbox(){
   const mount=document.getElementById("discovery");
-  if(!data?.configured){
-    mount.innerHTML='<section class="card discovery discovery-status"><div class="section-head"><div class="section-title">DISCOVERY / SEARCH CONSOLE</div><span>NOT CONNECTED</span></div><div class="muted">Search Console接続待ち。INDEX STATUS → IMPRESSIONS → CLICKS を点灯させる。</div></section>';
-    return;
-  }
-  if(data.error){
-    mount.innerHTML='<section class="error discovery">Search Console: '+esc(data.error)+'</section>';
-    return;
-  }
-
-  const cur=data.current||{};
-  const prev=data.previous||{};
-  const pctText=value=>(Number(value||0)*100).toFixed(1)+'%';
-  const pos=Number(cur.position||0);
-  const diagnosis=data.diagnosis||{label:"OBSERVE",detail:""};
-  const indexRows=(data.inspections||[]).map(x=>
-    '<tr><td><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.url)+'</span></td>'+
-    '<td>'+esc(x.verdict||"UNKNOWN")+'</td><td>'+esc(x.coverageState||"")+'</td>'+
-    '<td>'+esc(x.lastCrawlTime?new Date(x.lastCrawlTime).toLocaleString("ja-JP"):"")+'</td></tr>'
-  ).join("");
-
+  const seo=latestSnapshots("seo");
+  const geo=latestSnapshots("geo");
+  const latestSeo=seo[0]||null,prevSeo=seo[1]||null,latestGeo=geo[0]||null,prevGeo=geo[1]||null;
+  const indexState=getIndexStatus();
+  const indexedCount=KEY_PAGES.filter(p=>indexState[p.path]?.status==="indexed").length;
+  const diagnosis=discoveryDiagnosis(latestSeo,prevSeo,indexedCount);
+  const seoSummary=latestSeo?.summary||{impressions:0,clicks:0,ctr:0,position:0};
+  const geoSummary=latestGeo?.summary||{impressions:0};
+  const indexRows=KEY_PAGES.map(p=>{
+    const state=indexState[p.path]||{status:"unknown",checkedAt:""};
+    return '<tr><td><strong>'+esc(p.name)+'</strong><span class="path">'+esc(p.path)+'</span></td><td><select class="index-select" data-index-path="'+esc(p.path)+'"><option value="unknown" '+(state.status==="unknown"?"selected":"")+'>未確認</option><option value="indexed" '+(state.status==="indexed"?"selected":"")+'>INDEXED</option><option value="not_indexed" '+(state.status==="not_indexed"?"selected":"")+'>NOT INDEXED</option></select></td><td>'+esc(state.checkedAt||"—")+'</td></tr>';
+  }).join("");
+  const history=[...getDiscoverySnapshots()].sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt))).slice(0,6);
+  const historyHtml=history.map(x=>'<div class="snapshot-item"><span><strong>'+(x.kind==="seo"?"SEO":"GOOGLE AI")+'</strong> · '+new Date(x.importedAt).toLocaleString("ja-JP")+' · '+x.files.length+' files</span><span>IMP '+n(x.summary.impressions)+(x.kind==="seo"?' / CLICK '+n(x.summary.clicks):'')+'</span></div>').join("");
   mount.innerHTML=
     '<div class="discovery"><div class="grid">'+
-      '<section class="card seo-kpi"><div class="label">INDEX STATUS</div><div class="value">'+n(data.indexedCount)+'/'+n(data.inspectedCount)+'</div><div class="delta">主要ページ</div></section>'+
-      '<section class="card seo-kpi"><div class="label">SEO IMPRESSIONS</div><div class="value">'+n(cur.impressions)+'</div>'+delta(cur.impressions,prev.impressions)+'</section>'+
-      '<section class="card seo-kpi"><div class="label">SEO CLICKS</div><div class="value">'+n(cur.clicks)+'</div>'+delta(cur.clicks,prev.clicks)+'</section>'+
-      '<section class="card seo-kpi"><div class="label">SEO CTR</div><div class="value">'+pctText(cur.ctr)+'</div><div class="delta">前期間 '+pctText(prev.ctr)+'</div></section>'+
-      '<section class="card seo-kpi"><div class="label">AVG POSITION</div><div class="value">'+(pos?pos.toFixed(1):"—")+'</div><div class="delta">低いほど上位</div></section>'+
-      '<section class="card health"><div class="label">DISCOVERY HEALTH</div><div class="value" style="font-size:24px">'+esc(diagnosis.label)+'</div><div class="delta">'+esc(diagnosis.detail)+'</div></section>'+
-      '<section class="card index-table"><div class="section-head"><div class="section-title">INDEX STATUS / KEY PAGES</div><span>'+esc(data.dateRange?.start||"")+' → '+esc(data.dateRange?.end||"")+'</span></div>'+
-      '<table><thead><tr><th>PAGE</th><th>VERDICT</th><th>STATE</th><th>LAST CRAWL</th></tr></thead><tbody>'+indexRows+'</tbody></table></section>'+
+      '<section class="card inbox"><div class="section-head"><div class="section-title">DISCOVERY INBOX / ZERO-COST</div><span>Search Console CSVをローカル保存</span></div>'+
+        '<div class="inbox-controls"><select id="discoveryKind"><option value="seo">通常SEO</option><option value="geo">Google生成AI</option></select><input id="discoveryFiles" type="file" accept=".csv,text/csv" multiple><button id="importDiscovery" type="button">IMPORT</button></div>'+
+        '<div class="drop-note">Search Consoleで「エクスポート → CSV」。CSVが複数ならまとめて選択。API・Google Cloud・課金経路は使わない。データはこのブラウザのlocalStorageだけに保存。</div>'+
+      '</section>'+
+      '<section class="card seo-kpi"><div class="label">INDEX STATUS</div><div class="value">'+indexedCount+'/'+KEY_PAGES.length+'</div><div class="delta">手動URL検査の記録</div></section>'+
+      '<section class="card seo-kpi"><div class="label">SEO IMPRESSIONS</div><div class="value">'+n(seoSummary.impressions)+'</div>'+(prevSeo?delta(seoSummary.impressions,prevSeo.summary.impressions):'<div class="delta">baseline待ち</div>')+'</section>'+
+      '<section class="card seo-kpi"><div class="label">SEO CLICKS</div><div class="value">'+n(seoSummary.clicks)+'</div>'+(prevSeo?delta(seoSummary.clicks,prevSeo.summary.clicks):'<div class="delta">baseline待ち</div>')+'</section>'+
+      '<section class="card seo-kpi"><div class="label">SEO CTR</div><div class="value">'+Number(seoSummary.ctr||0).toFixed(1)+'%</div><div class="delta">date CSV基準</div></section>'+
+      '<section class="card seo-kpi"><div class="label">AVG POSITION</div><div class="value">'+(seoSummary.position?Number(seoSummary.position).toFixed(1):"—")+'</div><div class="delta">date CSVのimp加重</div></section>'+
+      '<section class="card seo-kpi"><div class="label">GOOGLE AI IMP</div><div class="value">'+n(geoSummary.impressions)+'</div>'+(prevGeo?delta(geoSummary.impressions,prevGeo.summary.impressions):'<div class="delta">baseline待ち</div>')+'</section>'+
+      '<section class="card health diagnostic"><div class="label">DISCOVERY HEALTH</div><div class="value" style="font-size:22px">'+esc(diagnosis.label)+'</div><div class="delta">'+esc(diagnosis.detail)+'</div></section>'+
+      '<section class="card chart-card"><div class="section-head"><div class="section-title">SEO VISIBILITY TREND</div><span>imported CSV</span></div>'+discoveryTrend(latestSeo)+'</section>'+
+      (latestGeo?'<section class="card chart-card"><div class="section-head"><div class="section-title">GOOGLE AI VISIBILITY TREND</div><span>imported CSV</span></div>'+discoveryTrend(latestGeo)+'</section>':'')+
+      discoveryTopRows(latestSeo)+
+      discoveryTopRows(latestGeo)+
+      '<section class="card index-table"><div class="section-head"><div class="section-title">INDEX STATUS / MANUAL</div><span>Search Console URL検査の結果だけ記録</span></div><table><thead><tr><th>PAGE</th><th>STATUS</th><th>CHECKED</th></tr></thead><tbody>'+indexRows+'</tbody></table></section>'+
+      '<section class="card inbox"><div class="section-head"><div class="section-title">IMPORT HISTORY</div><button id="clearDiscovery" type="button">CLEAR</button></div><div class="snapshot-list">'+(historyHtml||'<div class="muted">まだImportなし。</div>')+'</div></section>'+
     '</div></div>';
+  bindDiscoveryInbox();
 }
-
-async function loadDiscovery(){
-  const mount=document.getElementById("discovery");
-  mount.innerHTML='<section class="card discovery discovery-status">Loading Search Console…</section>';
-  try{
-    const res=await fetch('/api/discovery?days=28',{cache:"no-store"});
-    const data=await res.json();
-    renderDiscovery(data);
-  }catch(err){
-    mount.innerHTML='<section class="error discovery">'+esc(err.message)+'</section>';
-  }
+function bindDiscoveryInbox(){
+  const importBtn=document.getElementById("importDiscovery");
+  if(importBtn)importBtn.addEventListener("click",async()=>{
+    const input=document.getElementById("discoveryFiles");
+    const kind=document.getElementById("discoveryKind")?.value||"seo";
+    const files=[...(input?.files||[])];
+    if(!files.length){alert("CSVを選んでください");return;}
+    try{
+      const normalized=[];
+      for(const file of files){
+        if(!file.name.toLowerCase().endsWith(".csv"))continue;
+        normalized.push(normalizeCsvFile(file.name,await file.text()));
+      }
+      if(!normalized.length)throw new Error("CSVを読めませんでした");
+      const snapshot={kind,importedAt:new Date().toISOString(),files:normalized,summary:snapshotSummary(normalized,kind)};
+      const items=getDiscoverySnapshots();items.push(snapshot);saveDiscoverySnapshots(items);
+      renderDiscoveryInbox();
+    }catch(err){alert("Import失敗: "+err.message);}
+  });
+  document.querySelectorAll("[data-index-path]").forEach(select=>select.addEventListener("change",()=>{
+    const state=getIndexStatus();
+    state[select.dataset.indexPath]={status:select.value,checkedAt:new Date().toLocaleDateString("ja-JP")};
+    saveIndexStatus(state);renderDiscoveryInbox();
+  }));
+  const clear=document.getElementById("clearDiscovery");
+  if(clear)clear.addEventListener("click",()=>{
+    if(confirm("SEO/GEO Import履歴をこのブラウザから消しますか？")){
+      localStorage.removeItem(DISCOVERY_KEY);renderDiscoveryInbox();
+    }
+  });
 }
 
 async function load(){
@@ -1434,8 +1197,8 @@ document.querySelectorAll("[data-window]").forEach(btn=>btn.addEventListener("cl
   document.querySelectorAll("[data-window]").forEach(x=>x.classList.toggle("active",x===btn));
   load();
 }));
-document.getElementById("refresh").addEventListener("click",()=>{load();loadDiscovery();});
-loadDiscovery();
+document.getElementById("refresh").addEventListener("click",()=>{load();renderDiscoveryInbox();});
+renderDiscoveryInbox();
 load();
 </script>
 </body>
