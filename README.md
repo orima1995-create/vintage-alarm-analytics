@@ -6,7 +6,7 @@ VINTAGE ALARM専用の非公開アクセス解析ダッシュボード。
 
 アクセス数を眺めるためではなく、
 
-`X / 検索 → 入口ページ → 次の興味`
+`X / YouTube / 検索 → 入口ページ → 次の興味`
 
 が成立したかを確認する。
 
@@ -14,7 +14,7 @@ VINTAGE ALARM専用の非公開アクセス解析ダッシュボード。
 
 - 1H / 3H / 24H / 7D / 30D
 - Visits / Page views
-- X Visits / Organic Search
+- X Visits / YouTube Visits / Organic Search
 - Pages per Visit
 - Watch Entry Share
 - Traffic Trend 折れ線
@@ -29,7 +29,9 @@ VINTAGE ALARM専用の非公開アクセス解析ダッシュボード。
 - LOW SAMPLE 警告
 
 Campaign Funnelの投稿情報はブラウザのlocalStorageにのみ保存し、GitHubやCloudflareへ書き込まない。
-投稿時刻を登録するとTraffic Trend / Acquisition Trend上のマーカーとして利用する。
+X / YouTubeを選んで投稿URL・投稿時刻・対象ページ・手入力指標を登録でき、Traffic Trend / Acquisition Trend上のマーカーとして利用する。
+既存のXキャンペーン(localStorageの`vaCampaigns`)はplatform未指定ならXとして後方互換で読み込む。
+YouTubeは`youtube.com/watch` / `youtube.com/shorts` / `youtu.be`を受け付け、oEmbedでタイトル・チャンネル名を補完する。
 
 ## データ
 
@@ -70,6 +72,8 @@ Worker内のPAGE_NAMESで管理する。
 ## 注意
 
 - X Link clicksとCloudflare X Visitsは同一指標ではない。
+- YouTube Views / Likes / 平均視聴率とCloudflare YouTube Visitsも同一指標ではない。
+- YouTubeアプリ等でRefererが渡らないアクセスはDirect / Unknownになり得る。
 - Page viewsとVisitsは別定義。
 - Search Consoleの表示回数 / Click / CTR / QueryとCloudflare訪問データを混同しない。
 - Campaign Funnel内のCloudflare側数値は選択期間の比較値であり、投稿単位の完全帰属ではない。
