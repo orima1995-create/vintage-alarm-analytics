@@ -17,6 +17,9 @@ export default {
       return xPreviewResponse(url);
     }
 
+    if (url.pathname === "/api/youtube-preview") {
+      return youtubePreviewResponse(url);
+    }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return htmlResponse(DASHBOARD_HTML);
@@ -88,6 +91,72 @@ async function xPreviewResponse(url) {
       authorName: data.author_name || "",
       authorUrl: data.author_url || "",
       text,
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: error instanceof Error ? error.message : String(error) },
+      400,
+    );
+  }
+}
+
+
+function parseYouTubeVideoUrl(raw) {
+  const parsed = new URL(raw);
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  let videoId = "";
+  let kind = "video";
+
+  if (host === "youtu.be") {
+    videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+  } else if (host === "youtube.com" || host === "m.youtube.com") {
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] === "shorts" && parts[1]) {
+      videoId = parts[1];
+      kind = "shorts";
+    } else if (parts[0] === "embed" && parts[1]) {
+      videoId = parts[1];
+    } else if (parsed.pathname === "/watch") {
+      videoId = parsed.searchParams.get("v") || "";
+    }
+  } else {
+    throw new Error("YouTube URL only.");
+  }
+
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+    throw new Error("YouTube video URL format could not be recognized.");
+  }
+
+  return {
+    videoId,
+    kind,
+    canonicalUrl: kind === "shorts"
+      ? "https://www.youtube.com/shorts/" + videoId
+      : "https://www.youtube.com/watch?v=" + videoId,
+  };
+}
+
+async function youtubePreviewResponse(url) {
+  try {
+    const raw = url.searchParams.get("url") || "";
+    const parsed = parseYouTubeVideoUrl(raw);
+    const endpoint = new URL("https://www.youtube.com/oembed");
+    endpoint.searchParams.set("url", parsed.canonicalUrl);
+    endpoint.searchParams.set("format", "json");
+
+    const response = await fetch(endpoint.toString(), {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error("YouTube oEmbed HTTP " + response.status);
+
+    const data = await response.json();
+    return jsonResponse({
+      url: parsed.canonicalUrl,
+      videoId: parsed.videoId,
+      kind: parsed.kind,
+      title: data.title || "",
+      authorName: data.author_name || "",
+      authorUrl: data.author_url || "",
     });
   } catch (error) {
     return jsonResponse(
@@ -353,6 +422,7 @@ function normalizeTrend(data) {
         pageviews: 0,
         visits: 0,
         x: 0,
+        youtube: 0,
         instagram: 0,
         facebook: 0,
         otherSns: 0,
@@ -377,6 +447,7 @@ function normalizeTrend(data) {
     const visits = row?.sum?.visits || 0;
 
     if (channel === "X") point.x += visits;
+    else if (channel === "YouTube") point.youtube += visits;
     else if (channel === "Instagram") point.instagram += visits;
     else if (channel === "Facebook") point.facebook += visits;
     else if (channel === "Other SNS") point.otherSns += visits;
@@ -531,6 +602,7 @@ function buildFlows(rows) {
 function buildChannels(rows) {
   const channels = {
     "X": { pageviews: 0, visits: 0 },
+    "YouTube": { pageviews: 0, visits: 0 },
     "Instagram": { pageviews: 0, visits: 0 },
     "Facebook": { pageviews: 0, visits: 0 },
     "Other SNS": { pageviews: 0, visits: 0 },
@@ -563,6 +635,14 @@ function classifyReferrer(host) {
     value.endsWith(".twitter.com") ||
     value === "t.co"
   ) return "X";
+
+  if (
+    value === "youtu.be" ||
+    value.endsWith(".youtu.be") ||
+    value === "youtube.com" ||
+    value.endsWith(".youtube.com") ||
+    value.includes("youtube-nocookie.com")
+  ) return "YouTube";
 
   if (value.includes("instagram.com")) return "Instagram";
   if (value.includes("facebook.com")) return "Facebook";
@@ -675,7 +755,7 @@ th{font-size:10px;color:var(--muted);font-weight:600}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .path{display:block;color:var(--muted);font-size:10px;margin-top:2px;overflow-wrap:anywhere}
 .flag{display:inline-block;margin-left:6px;padding:2px 5px;border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:.08em}
-.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.chart-card{grid-column:1/-1}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 0;font-size:10px;color:var(--muted)}.legend-dot{width:8px;height:8px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center}.entry-bar{display:grid;grid-template-columns:minmax(120px,1fr) 3fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #ded7cc;font-size:12px}.entry-track,.flow-track{height:7px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--ink)}.donut-grid{display:grid;grid-template-columns:160px minmax(0,1fr);gap:22px;align-items:center}.donut{width:150px;height:150px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:28px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:27px}.mix-list{display:grid;gap:7px;font-size:11px}.mix-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:7px;align-items:center}.flow-viz{display:grid;gap:8px}.flow-viz-row{display:grid;grid-template-columns:minmax(110px,1fr) auto minmax(110px,1fr) 2fr auto;gap:8px;align-items:center;font-size:11px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px}.funnel-step{border:1px solid var(--line);padding:10px;min-height:74px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:24px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:7px;margin-top:14px}.campaign-form input,.campaign-form button{min-width:0;border:1px solid var(--line);background:transparent;padding:8px;font:inherit;font-size:11px}.campaign-list{margin-top:10px;display:grid;gap:6px;font-size:11px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #ded7cc;padding-top:7px}.muted{color:var(--muted)}details.raw{grid-column:1/-1}details.raw summary{cursor:pointer;font-size:11px;letter-spacing:.1em;color:var(--muted)}
+.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.chart-card{grid-column:1/-1}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 0;font-size:10px;color:var(--muted)}.legend-dot{width:8px;height:8px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center}.entry-bar{display:grid;grid-template-columns:minmax(120px,1fr) 3fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #ded7cc;font-size:12px}.entry-track,.flow-track{height:7px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--ink)}.donut-grid{display:grid;grid-template-columns:160px minmax(0,1fr);gap:22px;align-items:center}.donut{width:150px;height:150px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:28px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:27px}.mix-list{display:grid;gap:7px;font-size:11px}.mix-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:7px;align-items:center}.flow-viz{display:grid;gap:8px}.flow-viz-row{display:grid;grid-template-columns:minmax(110px,1fr) auto minmax(110px,1fr) 2fr auto;gap:8px;align-items:center;font-size:11px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:12px}.funnel-step{border:1px solid var(--line);padding:10px;min-height:74px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:24px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:7px;margin-top:14px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);background:transparent;color:var(--ink);padding:8px;font:inherit;font-size:11px}.campaign-list{margin-top:10px;display:grid;gap:6px;font-size:11px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #ded7cc;padding-top:7px}.muted{color:var(--muted)}details.raw{grid-column:1/-1}details.raw summary{cursor:pointer;font-size:11px;letter-spacing:.1em;color:var(--muted)}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid #ded7cc;font-size:12px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
 .bar{height:100%;background:var(--ink)}
@@ -724,7 +804,7 @@ function rows(items,max=8){
     return '<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+width+'%"></div></div></div>';
   }).join("");
 }
-const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
+const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",YouTube:"#a33b32",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
 function bucketTime(value){
   if(!value)return NaN;
   if(/^\d{4}-\d{2}-\d{2}$/.test(value))return new Date(value+"T00:00:00Z").getTime();
@@ -768,7 +848,10 @@ function lineChart(points,series,campaigns=[]){
     const mt=new Date(item.postedAt).getTime();
     if(!Number.isFinite(mt)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||mt<start||mt>end)return "";
     const x=l+((mt-start)/(end-start))*iw;
-    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="#8d2c23" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="#8d2c23">'+esc(item.label||"X POST")+'</text>';
+    const platform=item.platform==="YouTube"?"YouTube":"X";
+    const markerColor=platform==="YouTube"?COLORS.YouTube:COLORS.X;
+    const prefix=platform==="YouTube"?"YT":"X";
+    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+markerColor+'" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="'+markerColor+'">'+esc(prefix+" · "+(item.label||"POST"))+'</text>';
   }).join("");
   const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
   return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+markers+ticks+'</svg></div>'+legend;
@@ -780,6 +863,7 @@ function entryBars(pages){
 }
 function channelColor(name){
   if(name==="X")return COLORS.X;
+  if(name==="YouTube")return COLORS.YouTube;
   if(name==="Organic Search")return COLORS.Search;
   if(name==="Direct / Unknown")return COLORS.Direct;
   if(name==="Instagram"||name==="Facebook"||name==="Other SNS")return COLORS.Meta;
@@ -806,14 +890,35 @@ function flowVisual(items){
   return '<div class="flow-viz">'+list.map(x=>'<div class="flow-viz-row"><strong>'+esc(x.sourceName)+'</strong><span>→</span><strong>'+esc(x.destinationName)+'</strong><div class="flow-track"><div class="flow-fill" style="width:'+((x.pageviews/max)*100)+'%"></div></div><span class="flow-count">'+n(x.pageviews)+'</span></div>').join("")+'</div>';
 }
 const CAMPAIGN_KEY="vaCampaigns";
+function normalizeCampaign(item){
+  const platform=item?.platform==="YouTube"?"YouTube":"X";
+  return {
+    ...item,
+    platform,
+    label:String(item?.label||(platform==="YouTube"?"YOUTUBE VIDEO":"X POST")),
+    postUrl:String(item?.postUrl||""),
+    postId:String(item?.postId||""),
+    authorName:String(item?.authorName||""),
+    postText:String(item?.postText||""),
+    postedAt:String(item?.postedAt||""),
+    targetPath:normalizeTargetPath(item?.targetPath||"/"),
+    impressions:Number(item?.impressions||0),
+    engagements:Number(item?.engagements||0),
+    details:Number(item?.details||0),
+    linkClicks:Number(item?.linkClicks||0),
+    views:Number(item?.views||0),
+    likes:Number(item?.likes||0),
+    avgViewPercentage:Number(item?.avgViewPercentage||0)
+  };
+}
 function getCampaigns(){
   try{
     const parsed=JSON.parse(localStorage.getItem(CAMPAIGN_KEY)||"[]");
-    return Array.isArray(parsed)?parsed:[];
+    return Array.isArray(parsed)?parsed.map(normalizeCampaign):[];
   }catch{return[]}
 }
 function saveCampaigns(items){
-  localStorage.setItem(CAMPAIGN_KEY,JSON.stringify(items));
+  localStorage.setItem(CAMPAIGN_KEY,JSON.stringify(items.map(normalizeCampaign)));
 }
 function normalizeTargetPath(value){
   let out=String(value||"/").trim();
@@ -825,80 +930,134 @@ function campaignPanel(entryFlows,internalFlows){
   const campaigns=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
   const active=campaigns[0]||null;
   if(!active){
-    return '<div class="muted">投稿を登録すると、折れ線に投稿時刻を重ねてファネル比較できる。</div>'+campaignFormHtml();
+    return '<div class="muted">X / YouTube投稿を登録すると、折れ線に投稿時刻を重ねてファネル比較できる。</div>'+campaignFormHtml();
   }
-  const xEntries=entryFlows.filter(x=>x.channel==="X").reduce((s,x)=>s+x.visits,0);
-  const targetEntries=entryFlows.filter(x=>x.channel==="X"&&x.destinationPath===active.targetPath).reduce((s,x)=>s+x.visits,0);
-  const nextPages=internalFlows.filter(x=>x.sourceCleanPath===active.targetPath).reduce((s,x)=>s+x.pageviews,0);
-  const steps=[
-    ["IMPRESSIONS",active.impressions],
-    ["LINK CLICKS",active.linkClicks],
-    ["X ENTRIES*",xEntries],
-    ["TARGET ENTRIES*",targetEntries],
-    ["NEXT PAGE*",nextPages]
-  ];
+  const platform=active.platform==="YouTube"?"YouTube":"X";
+  const channelEntries=entryFlows.filter(x=>x.channel===platform).reduce((sum,x)=>sum+x.visits,0);
+  const targetEntries=entryFlows.filter(x=>x.channel===platform&&x.destinationPath===active.targetPath).reduce((sum,x)=>sum+x.visits,0);
+  const nextPages=internalFlows.filter(x=>x.sourceCleanPath===active.targetPath).reduce((sum,x)=>sum+x.pageviews,0);
+  const steps=platform==="YouTube"
+    ?[
+      ["VIEWS",active.views||"—"],
+      ["LIKES",active.likes||"—"],
+      ["AVG VIEW %",active.avgViewPercentage?active.avgViewPercentage.toFixed(1)+"%":"—"],
+      ["YOUTUBE ENTRIES*",channelEntries],
+      ["TARGET ENTRIES*",targetEntries],
+      ["NEXT PAGE*",nextPages]
+    ]
+    :[
+      ["IMPRESSIONS",active.impressions],
+      ["LINK CLICKS",active.linkClicks],
+      ["X ENTRIES*",channelEntries],
+      ["TARGET ENTRIES*",targetEntries],
+      ["NEXT PAGE*",nextPages]
+    ];
   const funnel='<div class="campaign-grid">'+steps.map(([label,val])=>'<div class="funnel-step"><span class="section-title">'+label+'</span><strong>'+esc(val)+'</strong></div>').join("")+'</div>'+
-    '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。</div>';
-  const list='<div class="campaign-list">'+campaigns.slice(0,5).map((x,i)=>'<div class="campaign-item"><span><strong>'+esc(x.label)+'</strong> · '+esc(x.postedAt||"時刻未登録")+' · '+esc(x.targetPath||"/")+(x.authorName?' · '+esc(x.authorName):'')+(x.postUrl?'<span class="path">'+esc(x.postUrl)+'</span>':'')+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
+    '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。YouTubeアプリ等でRefererが落ちる場合はDirect / Unknownになり得る。</div>';
+  const list='<div class="campaign-list">'+campaigns.slice(0,8).map((item,i)=>'<div class="campaign-item"><span><strong>['+esc(item.platform)+'] '+esc(item.label)+'</strong> · '+esc(item.postedAt||"時刻未登録")+' · '+esc(item.targetPath||"/")+(item.authorName?' · '+esc(item.authorName):'')+(item.postUrl?'<span class="path">'+esc(item.postUrl)+'</span>':'')+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
   return funnel+campaignFormHtml()+list;
 }
 function campaignFormHtml(){
   return '<form class="campaign-form" id="campaignForm">'+
+    '<select name="platform" aria-label="platform"><option value="X">X</option><option value="YouTube">YouTube</option></select>'+
     '<input name="postUrl" type="url" placeholder="X post URL（貼ると自動読込）">'+
     '<input name="label" placeholder="投稿名" required>'+
     '<input name="postedAt" type="datetime-local" required>'+
-    '<input name="targetPath" placeholder="/cyma-time-o-vox/" required>'+
+    '<input name="targetPath" placeholder="/basis-alarm/" required>'+
     '<input name="impressions" type="number" min="0" placeholder="imp">'+
     '<input name="engagements" type="number" min="0" placeholder="eng">'+
-    '<input name="details" type="number" min="0" placeholder="detail">'+
+    '<input name="details" type="number" min="0" step="0.1" placeholder="detail">'+
     '<input name="linkClicks" type="number" min="0" placeholder="click">'+
     '<button type="submit">ADD</button></form>';
+}
+function applyCampaignFormMode(form){
+  const platform=form.elements.platform?.value==="YouTube"?"YouTube":"X";
+  const url=form.elements.postUrl;
+  const impressions=form.elements.impressions;
+  const engagements=form.elements.engagements;
+  const details=form.elements.details;
+  const linkClicks=form.elements.linkClicks;
+  if(platform==="YouTube"){
+    if(url)url.placeholder="YouTube / Shorts URL（貼ると自動読込）";
+    if(impressions)impressions.placeholder="views";
+    if(engagements)engagements.placeholder="likes";
+    if(details)details.placeholder="avg view %";
+    if(linkClicks)linkClicks.placeholder="link clicks（任意）";
+  }else{
+    if(url)url.placeholder="X post URL（貼ると自動読込）";
+    if(impressions)impressions.placeholder="imp";
+    if(engagements)engagements.placeholder="eng";
+    if(details)details.placeholder="detail";
+    if(linkClicks)linkClicks.placeholder="click";
+  }
 }
 function bindCampaignUi(){
   const form=document.getElementById("campaignForm");
   if(form){
+    const platform=form.elements.platform;
     const postUrl=form.elements.postUrl;
+    applyCampaignFormMode(form);
+    if(platform)platform.addEventListener("change",()=>{
+      if(postUrl){
+        postUrl.value="";
+        postUrl.dataset.postId="";
+        postUrl.dataset.authorName="";
+        postUrl.dataset.postText="";
+        postUrl.dataset.state="";
+      }
+      applyCampaignFormMode(form);
+    });
     if(postUrl)postUrl.addEventListener("change",async()=>{
       const value=String(postUrl.value||"").trim();
       if(!value)return;
+      const currentPlatform=form.elements.platform?.value==="YouTube"?"YouTube":"X";
       postUrl.dataset.state="loading";
       try{
-        const res=await fetch('/api/x-preview?url='+encodeURIComponent(value),{cache:"no-store"});
+        const endpoint=currentPlatform==="YouTube"?"/api/youtube-preview":"/api/x-preview";
+        const res=await fetch(endpoint+'?url='+encodeURIComponent(value),{cache:"no-store"});
         const preview=await res.json();
         if(!res.ok||preview.error)throw new Error(preview.error||("HTTP "+res.status));
         postUrl.value=preview.url||value;
-        postUrl.dataset.postId=preview.postId||"";
+        postUrl.dataset.postId=preview.postId||preview.videoId||"";
         postUrl.dataset.authorName=preview.authorName||"";
-        postUrl.dataset.postText=preview.text||"";
+        postUrl.dataset.postText=preview.text||preview.title||"";
         if(!form.elements.label.value){
-          const base=(preview.text||"").replace(/\s+/g," ").trim();
-          form.elements.label.value=base?base.slice(0,42):(preview.authorName||"X POST");
+          const base=(preview.title||preview.text||"").replace(/\s+/g," ").trim();
+          form.elements.label.value=base?base.slice(0,60):(preview.authorName||(currentPlatform==="YouTube"?"YOUTUBE VIDEO":"X POST"));
         }
         postUrl.dataset.state="ready";
       }catch(err){
         postUrl.dataset.state="error";
-        alert("X投稿の読込に失敗: "+err.message);
+        alert((currentPlatform==="YouTube"?"YouTube動画":"X投稿")+"の読込に失敗: "+err.message);
       }
     });
     form.addEventListener("submit",event=>{
-    event.preventDefault();
-    const fd=new FormData(form);
-    const items=getCampaigns();
-    items.push({
-      label:String(fd.get("label")||"X POST"),
-      postUrl:String(fd.get("postUrl")||""),
-      postId:String(form.elements.postUrl?.dataset.postId||""),
-      authorName:String(form.elements.postUrl?.dataset.authorName||""),
-      postText:String(form.elements.postUrl?.dataset.postText||""),
-      postedAt:String(fd.get("postedAt")||""),
-      targetPath:normalizeTargetPath(fd.get("targetPath")),
-      impressions:Number(fd.get("impressions")||0),
-      engagements:Number(fd.get("engagements")||0),
-      details:Number(fd.get("details")||0),
-      linkClicks:Number(fd.get("linkClicks")||0)
-    });
-    saveCampaigns(items);
-    render(window.__vaLastData);
+      event.preventDefault();
+      const fd=new FormData(form);
+      const items=getCampaigns();
+      const currentPlatform=String(fd.get("platform")||"X")==="YouTube"?"YouTube":"X";
+      const metric1=Number(fd.get("impressions")||0);
+      const metric2=Number(fd.get("engagements")||0);
+      const metric3=Number(fd.get("details")||0);
+      items.push({
+        platform:currentPlatform,
+        label:String(fd.get("label")||(currentPlatform==="YouTube"?"YOUTUBE VIDEO":"X POST")),
+        postUrl:String(fd.get("postUrl")||""),
+        postId:String(form.elements.postUrl?.dataset.postId||""),
+        authorName:String(form.elements.postUrl?.dataset.authorName||""),
+        postText:String(form.elements.postUrl?.dataset.postText||""),
+        postedAt:String(fd.get("postedAt")||""),
+        targetPath:normalizeTargetPath(fd.get("targetPath")),
+        impressions:currentPlatform==="X"?metric1:0,
+        engagements:currentPlatform==="X"?metric2:0,
+        details:currentPlatform==="X"?metric3:0,
+        views:currentPlatform==="YouTube"?metric1:0,
+        likes:currentPlatform==="YouTube"?metric2:0,
+        avgViewPercentage:currentPlatform==="YouTube"?metric3:0,
+        linkClicks:Number(fd.get("linkClicks")||0)
+      });
+      saveCampaigns(items);
+      render(window.__vaLastData);
     });
   }
   document.querySelectorAll("[data-campaign-delete]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -941,7 +1100,7 @@ function render(data){
   ).join("");
   const lowSample=c.visits<30?'<section class="card low-sample"><strong>LOW SAMPLE</strong><span>'+n(c.visits)+' visits · まだ傾向断定は保留</span></section>':'';
   const trafficSeries=[{key:"pageviews",label:"Page views",color:COLORS.pageviews},{key:"visits",label:"Visits",color:COLORS.visits}];
-  const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"meta",label:"Meta",color:COLORS.Meta}];
+  const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"youtube",label:"YouTube",color:COLORS.YouTube},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"meta",label:"Meta",color:COLORS.Meta}];
   document.getElementById("content").innerHTML=
   '<div class="grid">'+audit+lowSample+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
