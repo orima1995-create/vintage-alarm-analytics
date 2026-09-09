@@ -1,6 +1,9 @@
 const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
 const DEFAULT_HOST = "orima1995-create.github.io";
 const BASE_PATH = "/orima1995-creator.github.io";
+const DEFAULT_GSC_SITE_URL = "https://orima1995-create.github.io/orima1995-creator.github.io/";
+const GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
+let gscTokenCache = null;
 
 export default {
   async fetch(request, env) {
@@ -15,6 +18,10 @@ export default {
 
     if (url.pathname === "/api/x-preview") {
       return xPreviewResponse(url);
+    }
+
+    if (url.pathname === "/api/discovery") {
+      return discoveryResponse(url, env);
     }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -51,6 +58,371 @@ function requireBasicAuth(request, env) {
       "X-Robots-Tag": "noindex, nofollow, noarchive",
     },
   });
+}
+
+async function discoveryResponse(url, env) {
+  const siteUrl = env.GSC_SITE_URL || DEFAULT_GSC_SITE_URL;
+  if (!env.GSC_SERVICE_ACCOUNT_JSON) {
+    return jsonResponse({
+      configured: false,
+      siteUrl,
+      reason: "GSC_SERVICE_ACCOUNT_JSON is not configured.",
+    });
+  }
+
+  try {
+    const days = normalizeDiscoveryDays(url.searchParams.get("days"));
+    const token = await getGscAccessToken(env);
+    const ranges = searchConsoleDateRanges(days);
+
+    const [
+      currentSummary,
+      previousSummary,
+      daily,
+      pages,
+      queries,
+      searchAppearance,
+    ] = await Promise.all([
+      gscSearchAnalytics(token, siteUrl, {
+        startDate: ranges.current.start,
+        endDate: ranges.current.end,
+        dataState: "all",
+        rowLimit: 1,
+      }),
+      gscSearchAnalytics(token, siteUrl, {
+        startDate: ranges.previous.start,
+        endDate: ranges.previous.end,
+        dataState: "final",
+        rowLimit: 1,
+      }),
+      gscSearchAnalytics(token, siteUrl, {
+        startDate: ranges.current.start,
+        endDate: ranges.current.end,
+        dataState: "all",
+        dimensions: ["date"],
+        rowLimit: 500,
+      }),
+      gscSearchAnalytics(token, siteUrl, {
+        startDate: ranges.current.start,
+        endDate: ranges.current.end,
+        dataState: "all",
+        dimensions: ["page"],
+        aggregationType: "byPage",
+        rowLimit: 50,
+      }),
+      gscSearchAnalytics(token, siteUrl, {
+        startDate: ranges.current.start,
+        endDate: ranges.current.end,
+        dataState: "all",
+        dimensions: ["query"],
+        rowLimit: 100,
+      }),
+      gscSearchAnalyticsSafe(token, siteUrl, {
+        startDate: ranges.current.start,
+        endDate: ranges.current.end,
+        dataState: "all",
+        dimensions: ["searchAppearance"],
+        rowLimit: 100,
+      }),
+    ]);
+
+    const keyPages = [
+      { name: "TOP", url: siteUrl },
+      { name: "HISTORY", url: new URL("history/", siteUrl).toString() },
+      { name: "OWNER'S NOTES", url: new URL("owners-notes/", siteUrl).toString() },
+      { name: "Pierce Duofon", url: new URL("pierce-duofon/", siteUrl).toString() },
+      { name: "Cyma Time-O-Vox", url: new URL("cyma-time-o-vox/", siteUrl).toString() },
+    ];
+
+    const inspectionSettled = await Promise.allSettled(
+      keyPages.map((page) => gscInspectUrl(token, siteUrl, page))
+    );
+
+    const inspections = inspectionSettled.map((result, index) => {
+      if (result.status === "fulfilled") return result.value;
+      return {
+        ...keyPages[index],
+        verdict: "ERROR",
+        coverageState: "",
+        indexingState: "",
+        pageFetchState: "",
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      };
+    });
+
+    const current = gscSummary(currentSummary);
+    const previous = gscSummary(previousSummary);
+    const indexedCount = inspections.filter((item) => item.verdict === "PASS").length;
+
+    return jsonResponse({
+      configured: true,
+      siteUrl,
+      days,
+      dateRange: ranges.current,
+      previousDateRange: ranges.previous,
+      current,
+      previous,
+      daily: gscRows(daily, "date"),
+      pages: gscRows(pages, "page"),
+      queries: gscRows(queries, "query"),
+      searchAppearance: searchAppearance.error
+        ? { rows: [], error: searchAppearance.error }
+        : { rows: gscRows(searchAppearance.data, "searchAppearance"), error: null },
+      inspections,
+      indexedCount,
+      inspectedCount: inspections.length,
+      diagnosis: buildDiscoveryDiagnosis({ current, previous, indexedCount, inspectedCount: inspections.length }),
+      metadata: daily?.metadata || null,
+    });
+  } catch (error) {
+    return jsonResponse({
+      configured: true,
+      siteUrl,
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+}
+
+function normalizeDiscoveryDays(value) {
+  const days = Number(value || 28);
+  return [7, 28, 90].includes(days) ? days : 28;
+}
+
+function searchConsoleDateRanges(days) {
+  const now = new Date();
+  const currentEnd = now;
+  const currentStart = new Date(now.getTime() - (days - 1) * 86400000);
+  const previousEnd = new Date(now.getTime() - days * 86400000);
+  const previousStart = new Date(now.getTime() - (days * 2 - 1) * 86400000);
+  return {
+    current: { start: formatPacificDate(currentStart), end: formatPacificDate(currentEnd) },
+    previous: { start: formatPacificDate(previousStart), end: formatPacificDate(previousEnd) },
+  };
+}
+
+function formatPacificDate(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+async function getGscAccessToken(env) {
+  const credentials = JSON.parse(env.GSC_SERVICE_ACCOUNT_JSON);
+  if (!credentials.client_email || !credentials.private_key) {
+    throw new Error("GSC service account JSON is missing client_email or private_key.");
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    gscTokenCache &&
+    gscTokenCache.email === credentials.client_email &&
+    gscTokenCache.expiresAt > now + 60
+  ) {
+    return gscTokenCache.accessToken;
+  }
+
+  const header = {
+    alg: "RS256",
+    typ: "JWT",
+    ...(credentials.private_key_id ? { kid: credentials.private_key_id } : {}),
+  };
+  const claims = {
+    iss: credentials.client_email,
+    scope: GSC_SCOPE,
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  };
+  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
+  const key = await importGooglePrivateKey(credentials.private_key);
+  const signature = await crypto.subtle.sign(
+    { name: "RSASSA-PKCS1-v1_5" },
+    key,
+    new TextEncoder().encode(unsigned),
+  );
+  const assertion = `${unsigned}.${base64UrlBytes(new Uint8Array(signature))}`;
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.access_token) {
+    throw new Error(`Google OAuth failed: ${payload.error_description || payload.error || response.status}`);
+  }
+
+  gscTokenCache = {
+    email: credentials.client_email,
+    accessToken: payload.access_token,
+    expiresAt: now + Number(payload.expires_in || 3600),
+  };
+  return payload.access_token;
+}
+
+async function importGooglePrivateKey(pem) {
+  const base64 = String(pem)
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return crypto.subtle.importKey(
+    "pkcs8",
+    bytes.buffer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+}
+
+function base64UrlJson(value) {
+  return base64UrlBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function base64UrlBytes(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function gscSearchAnalytics(token, siteUrl, body) {
+  const response = await fetch(
+    `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(`Search Console Analytics HTTP ${response.status}: ${googleErrorMessage(payload)}`);
+  }
+  return payload;
+}
+
+async function gscSearchAnalyticsSafe(token, siteUrl, body) {
+  try {
+    return { data: await gscSearchAnalytics(token, siteUrl, body), error: null };
+  } catch (error) {
+    return { data: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function gscInspectUrl(token, siteUrl, page) {
+  const response = await fetch(
+    "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        inspectionUrl: page.url,
+        siteUrl,
+        languageCode: "ja-JP",
+      }),
+    },
+  );
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(`URL Inspection HTTP ${response.status}: ${googleErrorMessage(payload)}`);
+  }
+  const status = payload?.inspectionResult?.indexStatusResult || {};
+  return {
+    ...page,
+    verdict: status.verdict || "UNKNOWN",
+    coverageState: status.coverageState || "",
+    indexingState: status.indexingState || "",
+    pageFetchState: status.pageFetchState || "",
+    robotsTxtState: status.robotsTxtState || "",
+    lastCrawlTime: status.lastCrawlTime || "",
+    googleCanonical: status.googleCanonical || "",
+    userCanonical: status.userCanonical || "",
+  };
+}
+
+function googleErrorMessage(payload) {
+  return payload?.error?.message || payload?.error_description || "Unknown Google API error";
+}
+
+function gscSummary(payload) {
+  const row = payload?.rows?.[0] || {};
+  return {
+    clicks: Number(row.clicks || 0),
+    impressions: Number(row.impressions || 0),
+    ctr: Number(row.ctr || 0),
+    position: Number(row.position || 0),
+  };
+}
+
+function gscRows(payload, dimension) {
+  return (payload?.rows || []).map((row) => ({
+    key: row?.keys?.[0] || "",
+    dimension,
+    clicks: Number(row.clicks || 0),
+    impressions: Number(row.impressions || 0),
+    ctr: Number(row.ctr || 0),
+    position: Number(row.position || 0),
+  }));
+}
+
+function buildDiscoveryDiagnosis({ current, previous, indexedCount, inspectedCount }) {
+  if (indexedCount < inspectedCount) {
+    return {
+      code: "INDEX_COVERAGE_CHECK",
+      label: "INDEX COVERAGE CHECK",
+      detail: `${indexedCount}/${inspectedCount} key pages passed URL Inspection.`,
+    };
+  }
+  if (current.impressions === 0) {
+    return {
+      code: "NO_SEARCH_VISIBILITY_YET",
+      label: "NO SEARCH VISIBILITY YET",
+      detail: "Key pages are indexed, but Search Console reports no impressions in this period.",
+    };
+  }
+
+  const impressionDelta = previous.impressions
+    ? (current.impressions - previous.impressions) / previous.impressions
+    : null;
+  const ctrDelta = previous.ctr ? (current.ctr - previous.ctr) / previous.ctr : null;
+  const positionWorsened = previous.position > 0 && current.position > previous.position + 2;
+
+  if (impressionDelta !== null && impressionDelta < -0.2 && positionWorsened) {
+    return {
+      code: "VISIBILITY_RANKING_SUSPECTED",
+      label: "VISIBILITY / RANKING SUSPECTED",
+      detail: "Impressions fell while average position worsened.",
+    };
+  }
+  if (impressionDelta !== null && impressionDelta > 0.1 && ctrDelta !== null && ctrDelta < -0.2) {
+    return {
+      code: "SNIPPET_INTENT_SUSPECTED",
+      label: "SNIPPET / INTENT SUSPECTED",
+      detail: "Visibility rose but CTR weakened.",
+    };
+  }
+  return {
+    code: "OBSERVE",
+    label: "OBSERVE",
+    detail: "No strong diagnostic pattern yet.",
+  };
 }
 
 async function xPreviewResponse(url) {
@@ -677,9 +1049,9 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid #ded7cc;font-size:12px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
 .bar{height:100%;background:var(--ink)}
-.error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
+.discovery{margin-bottom:12px}.discovery .grid{margin-top:0}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
 footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
-@media(max-width:900px){.kpi{grid-column:span 4}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half{grid-column:1/-1}.donut-grid{grid-template-columns:1fr}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}}
+@media(max-width:900px){.kpi,.seo-kpi,.health{grid-column:span 4}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half{grid-column:1/-1}.donut-grid{grid-template-columns:1fr}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}}
 </style>
 </head>
 <body>
@@ -696,6 +1068,7 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 </div>
 </header>
 <div class="status"><span id="period">Loading…</span><span id="updated"></span></div>
+<div id="discovery"></div>
 <div id="content"></div>
 <footer>Cloudflare Web Analytics / RUM。Page views と Visits は別定義。ページ表の ENTRY VISITS は、そのページが外部流入・直接流入の入口になった回数。内部遷移は0になり得る。検索露出は Search Console と分離して扱う。</footer>
 </main>
@@ -967,6 +1340,53 @@ function render(data){
   '</div>';
   bindCampaignUi();
 }
+function renderDiscovery(data){
+  const mount=document.getElementById("discovery");
+  if(!data?.configured){
+    mount.innerHTML='<section class="card discovery discovery-status"><div class="section-head"><div class="section-title">DISCOVERY / SEARCH CONSOLE</div><span>NOT CONNECTED</span></div><div class="muted">Search Console接続待ち。INDEX STATUS → IMPRESSIONS → CLICKS を点灯させる。</div></section>';
+    return;
+  }
+  if(data.error){
+    mount.innerHTML='<section class="error discovery">Search Console: '+esc(data.error)+'</section>';
+    return;
+  }
+
+  const cur=data.current||{};
+  const prev=data.previous||{};
+  const pctText=value=>(Number(value||0)*100).toFixed(1)+'%';
+  const pos=Number(cur.position||0);
+  const diagnosis=data.diagnosis||{label:"OBSERVE",detail:""};
+  const indexRows=(data.inspections||[]).map(x=>
+    '<tr><td><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.url)+'</span></td>'+
+    '<td>'+esc(x.verdict||"UNKNOWN")+'</td><td>'+esc(x.coverageState||"")+'</td>'+
+    '<td>'+esc(x.lastCrawlTime?new Date(x.lastCrawlTime).toLocaleString("ja-JP"):"")+'</td></tr>'
+  ).join("");
+
+  mount.innerHTML=
+    '<div class="discovery"><div class="grid">'+
+      '<section class="card seo-kpi"><div class="label">INDEX STATUS</div><div class="value">'+n(data.indexedCount)+'/'+n(data.inspectedCount)+'</div><div class="delta">主要ページ</div></section>'+
+      '<section class="card seo-kpi"><div class="label">SEO IMPRESSIONS</div><div class="value">'+n(cur.impressions)+'</div>'+delta(cur.impressions,prev.impressions)+'</section>'+
+      '<section class="card seo-kpi"><div class="label">SEO CLICKS</div><div class="value">'+n(cur.clicks)+'</div>'+delta(cur.clicks,prev.clicks)+'</section>'+
+      '<section class="card seo-kpi"><div class="label">SEO CTR</div><div class="value">'+pctText(cur.ctr)+'</div><div class="delta">前期間 '+pctText(prev.ctr)+'</div></section>'+
+      '<section class="card seo-kpi"><div class="label">AVG POSITION</div><div class="value">'+(pos?pos.toFixed(1):"—")+'</div><div class="delta">低いほど上位</div></section>'+
+      '<section class="card health"><div class="label">DISCOVERY HEALTH</div><div class="value" style="font-size:24px">'+esc(diagnosis.label)+'</div><div class="delta">'+esc(diagnosis.detail)+'</div></section>'+
+      '<section class="card index-table"><div class="section-head"><div class="section-title">INDEX STATUS / KEY PAGES</div><span>'+esc(data.dateRange?.start||"")+' → '+esc(data.dateRange?.end||"")+'</span></div>'+
+      '<table><thead><tr><th>PAGE</th><th>VERDICT</th><th>STATE</th><th>LAST CRAWL</th></tr></thead><tbody>'+indexRows+'</tbody></table></section>'+
+    '</div></div>';
+}
+
+async function loadDiscovery(){
+  const mount=document.getElementById("discovery");
+  mount.innerHTML='<section class="card discovery discovery-status">Loading Search Console…</section>';
+  try{
+    const res=await fetch('/api/discovery?days=28',{cache:"no-store"});
+    const data=await res.json();
+    renderDiscovery(data);
+  }catch(err){
+    mount.innerHTML='<section class="error discovery">'+esc(err.message)+'</section>';
+  }
+}
+
 async function load(){
   document.getElementById("content").innerHTML='<div class="card">Loading Cloudflare Web Analytics…</div>';
   try{
@@ -983,7 +1403,8 @@ document.querySelectorAll("[data-window]").forEach(btn=>btn.addEventListener("cl
   document.querySelectorAll("[data-window]").forEach(x=>x.classList.toggle("active",x===btn));
   load();
 }));
-document.getElementById("refresh").addEventListener("click",load);
+document.getElementById("refresh").addEventListener("click",()=>{load();loadDiscovery();});
+loadDiscovery();
 load();
 </script>
 </body>
