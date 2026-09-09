@@ -976,6 +976,7 @@ const KEY_PAGES=[
   {name:"TOP",path:"/"},
   {name:"HISTORY",path:"/history/"},
   {name:"OWNER'S NOTES",path:"/owners-notes/"},
+  {name:"Basis Alarm",path:"/basis-alarm/"},
   {name:"Pierce Duofon",path:"/pierce-duofon/"},
   {name:"Cyma Time-O-Vox",path:"/cyma-time-o-vox/"}
 ];
