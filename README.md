@@ -63,7 +63,7 @@ API token・Account ID・パスワードをGitHubへコミットしない。
 Traffic Trend / Acquisition Trendには `HOST MIGRATION` マーカーを表示し、既存のX / YouTube施策マーカーと同じ時間軸で判別できるようにする。
 これはJSTの日単位の基準線であり、正確な切替時刻を示すものではない。旧ホストと新ホストは別計測として保持し、移行をまたぐ数値を同条件の連続データとして比較しない。
 
-Workerは `vintagealarm.github.io` と `orima1995-create.github.io` を別々のGraphQL filterで取得する。画面とAI exportではNEW / OLDを別系列として返し、合計値へ混ぜない。施策比較は新ホストだけを対象にする。
+Workerは `vintagealarm.github.io` と `orima1995-create.github.io` を別々のGraphQL filterで取得する。画面とAI exportでは合算を主指標として返し、NEW / OLDの内訳と別系列も保持する。合算Visitsはhost別Visitsの足し算であり、ドメインをまたいだユニーク人数ではない。施策比較は新ホストだけを対象にする。
 
 ## ChatGPT / AI向け read-only export
 

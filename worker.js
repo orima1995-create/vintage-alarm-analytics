@@ -305,6 +305,14 @@ async function aiExportResponse(request, url, env) {
         trendBucket: payload.legacy.trendBucket,
         trendWarning: payload.legacy.trendWarning,
       },
+      combined: {
+        current: aiExportPeriod(payload.combined.current),
+        previous: aiExportPeriod(payload.combined.previous),
+        trend: payload.combined.trend,
+        trendBucket: payload.combined.trendBucket,
+        trendWarning: payload.combined.trendWarning,
+        note: payload.combined.note,
+      },
       limitations: {
         searchConsole:
           "Not included: Search Console / Google AI snapshots currently live only in dashboard browser localStorage.",
@@ -313,7 +321,7 @@ async function aiExportResponse(request, url, env) {
         attribution:
           "X/YouTube/SNS referrer paths can help diagnosis but do not guarantee post-level attribution.",
         hostSeparation:
-          "The new and legacy GitHub Pages hosts are queried and reported separately. Their totals are never combined into one continuous series.",
+          "NEW and OLD are queried separately. A host-scoped sum is also provided with its breakdown; it is not a cross-host unique-person count.",
       },
     });
   } catch (error) {
@@ -413,6 +421,10 @@ async function analyticsResponse(url, env) {
       fetchTrend(env, legacyHost, currentStart, now, windowSpec),
     ]);
 
+    const currentPeriod = normalizePeriod(current);
+    const previousPeriod = normalizePeriod(previous);
+    const legacyCurrentPeriod = normalizePeriod(legacyCurrent);
+    const legacyPreviousPeriod = normalizePeriod(legacyPrevious);
     const payload = {
       generatedAt: now.toISOString(),
       windowKey: windowSpec.key,
@@ -421,18 +433,26 @@ async function analyticsResponse(url, env) {
       windowEnd: now.toISOString(),
       host,
       hostMigration: HOST_MIGRATION,
-      current: normalizePeriod(current),
-      previous: normalizePeriod(previous),
+      current: currentPeriod,
+      previous: previousPeriod,
       trend: trendResult.points,
       trendBucket: trendResult.bucketField,
       trendWarning: trendResult.warning || null,
       legacy: {
         host: legacyHost,
-        current: normalizePeriod(legacyCurrent),
-        previous: normalizePeriod(legacyPrevious),
+        current: legacyCurrentPeriod,
+        previous: legacyPreviousPeriod,
         trend: legacyTrendResult.points,
         trendBucket: legacyTrendResult.bucketField,
         trendWarning: legacyTrendResult.warning || null,
+      },
+      combined: {
+        current: combinePeriods([currentPeriod, legacyCurrentPeriod]),
+        previous: combinePeriods([previousPeriod, legacyPreviousPeriod]),
+        trend: mergeTrendPoints([trendResult.points, legacyTrendResult.points]),
+        trendBucket: trendResult.bucketField || legacyTrendResult.bucketField,
+        trendWarning: [trendResult.warning, legacyTrendResult.warning].filter(Boolean).join(" / ") || null,
+        note: "Host-scoped visits summed across NEW and OLD; this is not a cross-host unique-person count.",
       },
     };
 
@@ -885,6 +905,44 @@ function normalizePeriod(data) {
   };
 }
 
+function mergeRowsBy(items, keys, numericFields) {
+  const merged = new Map();
+  for (const item of items) {
+    const key = JSON.stringify(keys.map((field) => item?.[field] ?? ""));
+    const current = merged.get(key) || { ...item };
+    for (const field of numericFields) current[field] = Number(current[field] || 0) + (merged.has(key) ? Number(item?.[field] || 0) : 0);
+    merged.set(key, current);
+  }
+  return [...merged.values()].sort((a, b) => (b.visits || b.pageviews || 0) - (a.visits || a.pageviews || 0));
+}
+
+function combineSnsEntries(periods) {
+  const pageRows = periods.flatMap((period) => period?.snsEntries?.pages || []);
+  const pages = new Map();
+  for (const row of pageRows) {
+    const current = pages.get(row.path) || { path: row.path, name: row.name, values: {}, total: 0 };
+    for (const [channel, value] of Object.entries(row.values || {})) current.values[channel] = Number(current.values[channel] || 0) + Number(value || 0);
+    current.total += Number(row.total || 0);
+    pages.set(row.path, current);
+  }
+  const result = [...pages.values()];
+  return { pages: result, total: result.reduce((sum, row) => sum + row.total, 0), complete: periods.every((period) => period?.snsEntries?.complete) };
+}
+
+export function combinePeriods(periods) {
+  return {
+    pageviews: periods.reduce((sum, period) => sum + Number(period?.pageviews || 0), 0),
+    visits: periods.reduce((sum, period) => sum + Number(period?.visits || 0), 0),
+    pages: mergeRowsBy(periods.flatMap((period) => period?.pages || []), ["path"], ["pageviews", "visits"]),
+    referrers: mergeRowsBy(periods.flatMap((period) => period?.referrers || []), ["host", "path"], ["pageviews", "visits"]),
+    flows: mergeRowsBy(periods.flatMap((period) => period?.flows || []), ["sourceHost", "sourcePath", "destinationPath", "channel", "country", "device"], ["pageviews", "visits"]),
+    channels: mergeRowsBy(periods.flatMap((period) => period?.channels || []), ["name"], ["pageviews", "visits"]),
+    snsEntries: combineSnsEntries(periods),
+    countries: mergeRowsBy(periods.flatMap((period) => period?.countries || []), ["name"], ["pageviews"]),
+    devices: mergeRowsBy(periods.flatMap((period) => period?.devices || []), ["name"], ["pageviews"]),
+  };
+}
+
 const PAGE_NAMES = Object.freeze({
   "/": "TOP",
   "/history/": "HISTORY",
@@ -1134,7 +1192,7 @@ th{font-size:9px;color:var(--muted);font-weight:700}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .path{display:block;color:var(--muted);font-size:9px;margin-top:2px;overflow-wrap:anywhere}
 .flag{display:inline-block;margin-left:6px;padding:2px 5px;border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:.08em}
-.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.host-scope{grid-column:1/-1}.host-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.host-block{border-top:1px solid var(--line);padding-top:9px}.host-block strong{font-family:Georgia,"Times New Roman",serif;font-size:22px}.host-block .path{margin-bottom:6px}.chart-card{grid-column:1/-1}.primary-chart{grid-column:span 8}.summary-chart{grid-column:span 4}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-wrap svg{display:block;max-height:205px}.chart-legend{display:flex;gap:12px;flex-wrap:wrap;margin:5px 0 0;font-size:9px;color:var(--muted)}.legend-dot{width:7px;height:7px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 12px}.entry-bar{display:grid;grid-template-columns:minmax(90px,1fr) 2fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line);font-size:10px}.entry-track,.flow-track{height:6px;border-radius:99px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--green)}.donut-grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;align-items:center}.donut{width:106px;height:106px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:22px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:22px}.mix-list{display:grid;gap:5px;font-size:9px}.mix-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center}.flow-viz{display:grid;gap:6px}.flow-viz-row{display:grid;grid-template-columns:minmax(100px,1fr) auto minmax(100px,1fr) 2fr auto;gap:7px;align-items:center;font-size:10px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.funnel-step{border:1px solid var(--line);border-radius:8px;padding:9px;min-height:66px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:21px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:6px;margin-top:12px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.campaign-list{margin-top:9px;display:grid;gap:5px;font-size:10px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:6px}.muted{color:var(--muted)}
+.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.host-scope,.event-index{grid-column:1/-1}.host-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.host-block{border-top:1px solid var(--line);padding-top:9px}.host-block strong{font-family:Georgia,"Times New Roman",serif;font-size:22px}.host-block .path{margin-bottom:6px}.event-list{display:flex;flex-wrap:wrap;gap:7px 14px}.event-item{display:flex;align-items:center;gap:6px;font-size:10px}.event-no{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--ink);color:#fff;font-weight:800}.chart-card{grid-column:1/-1}.primary-chart{grid-column:span 8}.summary-chart{grid-column:span 4}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-wrap svg{display:block;max-height:215px}.chart-legend{display:flex;gap:12px;flex-wrap:wrap;margin:5px 0 0;font-size:9px;color:var(--muted)}.legend-dot{width:7px;height:7px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 12px}.entry-bar{display:grid;grid-template-columns:minmax(90px,1fr) 2fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line);font-size:10px}.entry-track,.flow-track{height:6px;border-radius:99px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--green)}.donut-grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;align-items:center}.donut{width:106px;height:106px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:22px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:22px}.mix-list{display:grid;gap:5px;font-size:9px}.mix-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center}.flow-viz{display:grid;gap:6px}.flow-viz-row{display:grid;grid-template-columns:minmax(100px,1fr) auto minmax(100px,1fr) 2fr auto;gap:7px;align-items:center;font-size:10px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.funnel-step{border:1px solid var(--line);border-radius:8px;padding:9px;min-height:66px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:21px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:6px;margin-top:12px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.campaign-list{margin-top:9px;display:grid;gap:5px;font-size:10px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:6px}.muted{color:var(--muted)}
 details.drawer{grid-column:1/-1;padding:0}details.drawer>summary,details.discovery-shell>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;font-size:10px;letter-spacing:.13em;font-weight:800;color:var(--ink)}details.drawer>summary::-webkit-details-marker,details.discovery-shell>summary::-webkit-details-marker{display:none}details.drawer>summary:after,details.discovery-shell>summary:after{content:"＋";font-size:15px;color:var(--green)}details.drawer[open]>summary:after,details.discovery-shell[open]>summary:after{content:"−"}.drawer-content{padding:0 14px 14px}.drawer-meta{font-size:9px;letter-spacing:0;color:var(--muted);font-weight:600}.detail-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}.detail-grid>.card{box-shadow:none;background:#fff;border-radius:9px}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--line);font-size:10px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
@@ -1211,9 +1269,26 @@ function hostTrendPoints(current,legacy){
   return [...points.values()].sort((a,b)=>String(a.bucket).localeCompare(String(b.bucket)));
 }
 const HOST_MIGRATION = ${JSON.stringify(HOST_MIGRATION)};
+function timelineEvents(campaigns,hostMigration,start,end){
+  return (hostMigration?[...campaigns,{linkAddedAt:HOST_MIGRATION.markerAt,label:"HOST MIGRATION",migration:true}]:campaigns)
+    .map(item=>({...item,markerTime:new Date(item.linkAddedAt).getTime()}))
+    .filter(item=>item.linkAddedAt&&Number.isFinite(item.markerTime)&&Number.isFinite(start)&&Number.isFinite(end)&&end>start&&item.markerTime>=start&&item.markerTime<=end)
+    .sort((a,b)=>a.markerTime-b.markerTime)
+    .map((item,index)=>({...item,markerNumber:index+1}));
+}
+function eventIndex(campaigns){
+  const start=new Date(window.__vaWindowStart).getTime(),end=new Date(window.__vaWindowEnd).getTime();
+  const events=timelineEvents(campaigns,true,start,end);
+  if(!events.length)return "";
+  return '<section class="card event-index"><div class="section-head"><div class="section-title">TIMELINE EVENTS</div><span>番号は各グラフ共通</span></div><div class="event-list">'+events.map(item=>{
+    const platform=item.migration?"MIGRATION":item.platform==="YouTube"?"YOUTUBE":"X";
+    const date=item.migration?HOST_MIGRATION.date:new Date(item.markerTime).toLocaleString("ja-JP");
+    return '<span class="event-item"><i class="event-no">'+item.markerNumber+'</i><span><strong>'+esc(platform)+'</strong> · '+esc(item.label||"POST")+'<span class="path">'+esc(date)+'</span></span></span>';
+  }).join("")+'</div></section>';
+}
 function lineChart(points,series,campaigns=[],hostMigration=false){
   if(!points?.length)return '<div class="muted">時系列データなし</div>';
-  const w=900,h=220,l=42,r=18,t=16,b=30,iw=w-l-r,ih=h-t-b;
+  const w=900,h=230,l=42,r=18,t=30,b=30,iw=w-l-r,ih=h-t-b;
   const start=new Date(window.__vaWindowStart||points[0].bucket).getTime();
   const end=new Date(window.__vaWindowEnd||points[points.length-1].bucket).getTime();
   const values=points.flatMap(p=>series.map(s=>Number(p[s.key]||0)));
@@ -1236,24 +1311,16 @@ function lineChart(points,series,campaigns=[],hostMigration=false){
   }).join("");
   const tickIdx=[0,Math.floor((points.length-1)/4),Math.floor((points.length-1)/2),Math.floor((points.length-1)*3/4),points.length-1].filter((v,i,a)=>v>=0&&a.indexOf(v)===i);
   const ticks=tickIdx.map(i=>'<text x="'+xFor(points[i].bucket,i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="#706d67">'+esc(bucketLabel(points[i].bucket))+'</text>').join("");
-  const events=(hostMigration ? [...campaigns,{linkAddedAt:HOST_MIGRATION.markerAt,label:"HOST MIGRATION",migration:true}] : campaigns)
-    .map(item=>({...item,markerTime:new Date(item.linkAddedAt).getTime()}))
-    .filter(item=>item.linkAddedAt&&Number.isFinite(item.markerTime)&&Number.isFinite(start)&&Number.isFinite(end)&&end>start&&item.markerTime>=start&&item.markerTime<=end)
-    .sort((a,b)=>a.markerTime-b.markerTime);
-  const laneLastX=Array(6).fill(-Infinity);
-  const markers=events.map(item=>{
-    const x=l+((item.markerTime-start)/(end-start))*iw;
-    let lane=laneLastX.findIndex(lastX=>x-lastX>=120);
-    if(lane<0)lane=laneLastX.indexOf(Math.min(...laneLastX));
-    laneLastX[lane]=x;
+  const events=timelineEvents(campaigns,hostMigration,start,end);
+  const rawXs=events.map(item=>l+((item.markerTime-start)/(end-start))*iw);
+  const badgeXs=rawXs.map(x=>Math.max(l+8,Math.min(w-r-8,x)));
+  for(let i=badgeXs.length-2;i>=0;i--)badgeXs[i]=Math.min(badgeXs[i],badgeXs[i+1]-20);
+  if(badgeXs[0]<l+8){const shift=l+8-badgeXs[0];for(let i=0;i<badgeXs.length;i++)badgeXs[i]+=shift;}
+  const markers=events.map((item,index)=>{
+    const x=rawXs[index],badgeX=badgeXs[index];
     const platform=item.platform==="YouTube"?"YouTube":"X";
     const color=item.migration?"#706d67":platform==="YouTube"?COLORS.YouTube:COLORS.X;
-    const prefix=platform==="YouTube"?"YT":"X";
-    const nearRight=x>w-r-150;
-    const labelX=nearRight?x-5:x+5;
-    const anchor=nearRight?"end":"start";
-    const label=esc(item.migration?item.label:prefix+" · "+(item.label||"POST"));
-    return '<line data-event-marker="line" x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+color+'" stroke-width="1" stroke-dasharray="4 4"/><text data-event-marker="label" x="'+labelX+'" y="'+(t+11+lane*13)+'" text-anchor="'+anchor+'" font-size="9" font-weight="700" fill="'+color+'" style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">'+label+'</text>';
+    return '<line data-event-marker="guide" x1="'+badgeX+'" y1="19" x2="'+x+'" y2="'+t+'" stroke="'+color+'" stroke-width="1"/><line data-event-marker="line" x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+color+'" stroke-width="1" stroke-dasharray="4 4"/><circle data-event-marker="badge" cx="'+badgeX+'" cy="11" r="8" fill="#fff" stroke="'+color+'"/><text data-event-marker="number" x="'+badgeX+'" y="14" text-anchor="middle" font-size="9" font-weight="800" fill="'+color+'">'+item.markerNumber+'</text>';
   }).join("");
   const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
   return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+markers+ticks+'</svg></div>'+legend;
@@ -1494,22 +1561,24 @@ function render(data){
   window.__vaLastData=data;
   window.__vaWindowStart=data.windowStart;
   window.__vaWindowEnd=data.windowEnd;
-  const c=data.current,p=data.previous;
+  const nc=data.current,np=data.previous;
   const legacy=data.legacy||{};
   const lc=legacy.current||{pageviews:0,visits:0,pages:[],channels:[],referrers:[],flows:[],countries:[],devices:[]};
+  const c=data.combined?.current||nc,p=data.combined?.previous||np;
   document.getElementById("period").textContent=data.windowLabel || windowKey;
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
   const xNow=c.channels.find(x=>x.name==="X")?.visits||0;
   const xPrev=p.channels.find(x=>x.name==="X")?.visits||0;
+  const youtubeNow=c.channels.find(x=>x.name==="YouTube")?.visits||0;
   const searchNow=c.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const entryFlows=c.flows.filter(x=>x.visits>0 && x.channel!=="Internal Navigation");
   const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation"&&x.sourceCleanPath!==x.destinationPath);
   const campaigns=getCampaigns();
-  const trend=data.trend||[];
+  const newTrend=data.trend||[];
+  const trend=data.combined?.trend||newTrend;
   const legacyTrend=legacy.trend||[];
-  const transitionTrend=hostTrendPoints(trend,legacyTrend);
-  const pagesPerVisit=c.visits?c.pageviews/c.visits:0;
+  const transitionTrend=hostTrendPoints(newTrend,legacyTrend);
   const watchEntry=c.pages.filter(x=>["Basis Alarm","Pierce Duofon","Cyma Time-O-Vox"].includes(x.name)).reduce((s,x)=>s+x.visits,0);
   const watchShare=c.visits?(watchEntry/c.visits)*100:0;
   const unmapped=c.pages.filter(x=>!x.mapped);
@@ -1532,20 +1601,22 @@ function render(data){
   document.getElementById("content").innerHTML=
   '<div class="path">'+esc(HOST_MIGRATION.note)+'</div>'+
   '<div class="grid analytics-grid">'+audit+lowSample+
-    '<section class="card host-scope"><div class="section-head"><div class="section-title">HOST SCOPE · SEPARATE MEASUREMENT</div><span>新旧を合算しません</span></div><div class="host-grid">'+
-      '<div class="host-block"><span class="path">NEW · '+esc(data.host)+'</span><strong>'+n(c.visits)+' visits</strong><div class="delta">'+n(c.pageviews)+' page views · '+esc(data.windowLabel||windowKey)+'</div></div>'+
-      '<div class="host-block"><span class="path">OLD · '+esc(legacy.host||HOST_MIGRATION.oldHost)+'</span><strong>'+n(lc.visits)+' visits</strong><div class="delta">'+n(lc.pageviews)+' page views · '+esc(data.windowLabel||windowKey)+'</div></div>'+
+    '<section class="card host-scope"><div class="section-head"><div class="section-title">TOTAL + HOST BREAKDOWN</div><span>合計はhost別Visitsの足し算。ユニーク人数ではありません</span></div><div class="host-grid">'+
+      '<div class="host-block"><span class="path">TOTAL · NEW + OLD</span><strong>'+n(c.visits)+' visits</strong><div class="delta">'+n(c.pageviews)+' page views · host別Visitsの合計</div></div>'+
+      '<div class="host-block"><span class="path">NEW · '+esc(data.host)+'</span><strong>'+n(nc.visits)+' visits</strong><div class="delta">'+n(nc.pageviews)+' page views · '+(c.visits?((nc.visits/c.visits)*100).toFixed(0):0)+'%</div></div>'+
+      '<div class="host-block"><span class="path">OLD · '+esc(legacy.host||HOST_MIGRATION.oldHost)+'</span><strong>'+n(lc.visits)+' visits</strong><div class="delta">'+n(lc.pageviews)+' page views · '+(c.visits?((lc.visits/c.visits)*100).toFixed(0):0)+'%</div></div>'+
     '</div></section>'+
-    '<section class="card kpi"><div class="label">NEW VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
-    '<section class="card kpi"><div class="label">NEW PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
+    eventIndex(campaigns)+
+    '<section class="card kpi"><div class="label">TOTAL VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
+    '<section class="card kpi"><div class="label">TOTAL PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">X VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
-    '<section class="card kpi"><div class="label">PAGES / VISIT</div><div class="value">'+pagesPerVisit.toFixed(2)+'</div><div class="delta">回遊の粗い指標</div></section>'+
+    '<section class="card kpi"><div class="label">YOUTUBE VISITS</div><div class="value">'+n(youtubeNow)+'</div><div class="delta">Referer判別。0は流入なし／Referer消失を区別不可</div></section>'+
     '<section class="card kpi"><div class="label">WATCH ENTRY SHARE</div><div class="value">'+watchShare.toFixed(0)+'%</div><div class="delta">全流入 '+n(c.visits)+'件中 '+n(watchEntry)+'件</div></section>'+
     '<section class="card chart-card"><div class="section-head"><div class="section-title">HOST TRANSITION · VISITS</div><span>旧・新を別系列で表示</span></div>'+lineChart(transitionTrend,hostSeries,campaigns,true)+((data.trendWarning||legacy.trendWarning)?'<div class="path">'+esc([data.trendWarning,legacy.trendWarning].filter(Boolean).join(" / "))+'</div>':'')+'</section>'+
-    '<section class="card primary-chart"><div class="section-head"><div class="section-title">NEW HOST TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns,true)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">TOTAL TRAFFIC TREND</div><span>'+esc(data.combined?.trendBucket||data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns,true)+(data.combined?.trendWarning?'<div class="path">'+esc(data.combined.trendWarning)+'</div>':'')+'</section>'+
     '<section class="card summary-chart"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
-    '<section class="card primary-chart"><div class="section-head"><div class="section-title">NEW HOST ACQUISITION TREND</div><span>流入元別の入口回数</span></div>'+lineChart(trend,acquisitionSeries,campaigns,true)+'</section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">TOTAL ACQUISITION TREND</div><span>新旧合算・流入元別</span></div>'+lineChart(trend,acquisitionSeries,campaigns,true)+'</section>'+
     '<section class="card summary-chart"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SNS → WATCH ENTRY</div><span>判別できたSNS流入の着地先</span></div>'+snsEntryChart(c.snsEntries)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div>'+flowVisual(internalFlows)+'</section>'+
