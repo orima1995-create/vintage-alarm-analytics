@@ -87,6 +87,45 @@ assert.deepEqual(mergedTrend.map(point => [point.bucket, point.pageviews, point.
   ["2026-09-10", 4, 4, 1],
 ]);
 
+const apiPassword = "api-test-password";
+const apiAuth = Buffer.from(`admin:${apiPassword}`).toString("base64");
+const queriedHosts = [];
+const fakeAnalyticsFetch = async (_url, options) => {
+  const request = JSON.parse(options.body);
+  const host = request.variables.filter.AND.find(part => part.requestHost)?.requestHost;
+  queriedHosts.push(host);
+  const value = host === "vintagealarm.github.io" ? 5 : 9;
+  const account = request.query.includes("VintageAlarmTrend")
+    ? { totals: [{ count: value, sum: { visits: value }, dimensions: { bucket: "2026-09-10" } }], acquisition: [] }
+    : {
+        total: [{ count: value, sum: { visits: value } }],
+        pages: [{ count: value, sum: { visits: value }, dimensions: { requestPath: "/" } }],
+        referers: [], flows: [], entries: [], countries: [], devices: [],
+      };
+  return new Response(JSON.stringify({ data: { viewer: { accounts: [account] } } }), {
+    headers: { "Content-Type": "application/json" },
+  });
+};
+const analyticsApiResponse = await worker.fetch(
+  new Request("https://dashboard.test/api/analytics?window=7d", { headers: { Authorization: `Basic ${apiAuth}` } }),
+  {
+    DASHBOARD_PASSWORD: apiPassword,
+    CF_API_TOKEN: "test-token",
+    CF_ACCOUNT_ID: "test-account",
+    REQUEST_HOST: "vintagealarm.github.io",
+    LEGACY_REQUEST_HOST: "orima1995-create.github.io",
+    ANALYTICS_FETCH: fakeAnalyticsFetch,
+  },
+);
+assert.equal(analyticsApiResponse.status, 200);
+const analyticsPayload = await analyticsApiResponse.json();
+assert.equal(analyticsPayload.host, "vintagealarm.github.io");
+assert.equal(analyticsPayload.current.visits, 5);
+assert.equal(analyticsPayload.legacy.host, "orima1995-create.github.io");
+assert.equal(analyticsPayload.legacy.current.visits, 9);
+assert.equal(queriedHosts.filter(host => host === "vintagealarm.github.io").length, 3);
+assert.equal(queriedHosts.filter(host => host === "orima1995-create.github.io").length, 3);
+
 const password = "ci-test-password";
 const auth = Buffer.from(`admin:${password}`).toString("base64");
 const response = await worker.fetch(
@@ -178,6 +217,10 @@ const requiredLayoutFragments = [
   'option value="YouTube"',
   '"/api/youtube-preview"',
   'key:"youtube",label:"YouTube"',
+  'HOST SCOPE · SEPARATE MEASUREMENT',
+  'HOST TRANSITION · VISITS',
+  'LEGACY HOST DETAILS',
+  'function hostTrendPoints(',
 ];
 
 for (const fragment of requiredLayoutFragments) {

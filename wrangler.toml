@@ -5,6 +5,7 @@ workers_dev = true
 
 [vars]
 REQUEST_HOST = "vintagealarm.github.io"
+LEGACY_REQUEST_HOST = "orima1995-create.github.io"
 
 # Secrets are intentionally not committed.
 # Set them after deployment:

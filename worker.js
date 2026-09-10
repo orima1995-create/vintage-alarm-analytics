@@ -297,6 +297,14 @@ async function aiExportResponse(request, url, env) {
       trend: payload.trend,
       trendBucket: payload.trendBucket,
       trendWarning: payload.trendWarning,
+      legacy: {
+        host: payload.legacy.host,
+        current: aiExportPeriod(payload.legacy.current),
+        previous: aiExportPeriod(payload.legacy.previous),
+        trend: payload.legacy.trend,
+        trendBucket: payload.legacy.trendBucket,
+        trendWarning: payload.legacy.trendWarning,
+      },
       limitations: {
         searchConsole:
           "Not included: Search Console / Google AI snapshots currently live only in dashboard browser localStorage.",
@@ -304,6 +312,8 @@ async function aiExportResponse(request, url, env) {
           "Aggregate Cloudflare Web Analytics only; no IP addresses, cookies, or raw user-agent strings are exported.",
         attribution:
           "X/YouTube/SNS referrer paths can help diagnosis but do not guarantee post-level attribution.",
+        hostSeparation:
+          "The new and legacy GitHub Pages hosts are queried and reported separately. Their totals are never combined into one continuous series.",
       },
     });
   } catch (error) {
@@ -392,11 +402,15 @@ async function analyticsResponse(url, env) {
     const currentStart = new Date(now.getTime() - windowSpec.ms);
     const previousStart = new Date(now.getTime() - windowSpec.ms * 2);
     const host = env.REQUEST_HOST || DEFAULT_HOST;
+    const legacyHost = env.LEGACY_REQUEST_HOST || HOST_MIGRATION.oldHost;
 
-    const [current, previous, trendResult] = await Promise.all([
+    const [current, previous, trendResult, legacyCurrent, legacyPrevious, legacyTrendResult] = await Promise.all([
       fetchPeriod(env, host, currentStart, now),
       fetchPeriod(env, host, previousStart, currentStart),
       fetchTrend(env, host, currentStart, now, windowSpec),
+      fetchPeriod(env, legacyHost, currentStart, now),
+      fetchPeriod(env, legacyHost, previousStart, currentStart),
+      fetchTrend(env, legacyHost, currentStart, now, windowSpec),
     ]);
 
     const payload = {
@@ -412,6 +426,14 @@ async function analyticsResponse(url, env) {
       trend: trendResult.points,
       trendBucket: trendResult.bucketField,
       trendWarning: trendResult.warning || null,
+      legacy: {
+        host: legacyHost,
+        current: normalizePeriod(legacyCurrent),
+        previous: normalizePeriod(legacyPrevious),
+        trend: legacyTrendResult.points,
+        trendBucket: legacyTrendResult.bucketField,
+        trendWarning: legacyTrendResult.warning || null,
+      },
     };
 
     return jsonResponse(payload);
@@ -788,7 +810,8 @@ function normalizeTrend(data) {
 }
 
 async function cloudflareGraphQL(env, query, variables) {
-  const response = await fetch(GRAPHQL_ENDPOINT, {
+  const request = typeof env.ANALYTICS_FETCH === "function" ? env.ANALYTICS_FETCH : fetch;
+  const response = await request(GRAPHQL_ENDPOINT, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.CF_API_TOKEN}`,
@@ -1111,7 +1134,7 @@ th{font-size:9px;color:var(--muted);font-weight:700}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .path{display:block;color:var(--muted);font-size:9px;margin-top:2px;overflow-wrap:anywhere}
 .flag{display:inline-block;margin-left:6px;padding:2px 5px;border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:.08em}
-.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.chart-card{grid-column:1/-1}.primary-chart{grid-column:span 8}.summary-chart{grid-column:span 4}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-wrap svg{display:block;max-height:205px}.chart-legend{display:flex;gap:12px;flex-wrap:wrap;margin:5px 0 0;font-size:9px;color:var(--muted)}.legend-dot{width:7px;height:7px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 12px}.entry-bar{display:grid;grid-template-columns:minmax(90px,1fr) 2fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line);font-size:10px}.entry-track,.flow-track{height:6px;border-radius:99px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--green)}.donut-grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;align-items:center}.donut{width:106px;height:106px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:22px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:22px}.mix-list{display:grid;gap:5px;font-size:9px}.mix-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center}.flow-viz{display:grid;gap:6px}.flow-viz-row{display:grid;grid-template-columns:minmax(100px,1fr) auto minmax(100px,1fr) 2fr auto;gap:7px;align-items:center;font-size:10px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.funnel-step{border:1px solid var(--line);border-radius:8px;padding:9px;min-height:66px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:21px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:6px;margin-top:12px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.campaign-list{margin-top:9px;display:grid;gap:5px;font-size:10px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:6px}.muted{color:var(--muted)}
+.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.host-scope{grid-column:1/-1}.host-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.host-block{border-top:1px solid var(--line);padding-top:9px}.host-block strong{font-family:Georgia,"Times New Roman",serif;font-size:22px}.host-block .path{margin-bottom:6px}.chart-card{grid-column:1/-1}.primary-chart{grid-column:span 8}.summary-chart{grid-column:span 4}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-wrap svg{display:block;max-height:205px}.chart-legend{display:flex;gap:12px;flex-wrap:wrap;margin:5px 0 0;font-size:9px;color:var(--muted)}.legend-dot{width:7px;height:7px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 12px}.entry-bar{display:grid;grid-template-columns:minmax(90px,1fr) 2fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line);font-size:10px}.entry-track,.flow-track{height:6px;border-radius:99px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--green)}.donut-grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;align-items:center}.donut{width:106px;height:106px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:22px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:22px}.mix-list{display:grid;gap:5px;font-size:9px}.mix-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center}.flow-viz{display:grid;gap:6px}.flow-viz-row{display:grid;grid-template-columns:minmax(100px,1fr) auto minmax(100px,1fr) 2fr auto;gap:7px;align-items:center;font-size:10px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.funnel-step{border:1px solid var(--line);border-radius:8px;padding:9px;min-height:66px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:21px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:6px;margin-top:12px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.campaign-list{margin-top:9px;display:grid;gap:5px;font-size:10px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:6px}.muted{color:var(--muted)}
 details.drawer{grid-column:1/-1;padding:0}details.drawer>summary,details.discovery-shell>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;font-size:10px;letter-spacing:.13em;font-weight:800;color:var(--ink)}details.drawer>summary::-webkit-details-marker,details.discovery-shell>summary::-webkit-details-marker{display:none}details.drawer>summary:after,details.discovery-shell>summary:after{content:"＋";font-size:15px;color:var(--green)}details.drawer[open]>summary:after,details.discovery-shell[open]>summary:after{content:"−"}.drawer-content{padding:0 14px 14px}.drawer-meta{font-size:9px;letter-spacing:0;color:var(--muted);font-weight:600}.detail-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}.detail-grid>.card{box-shadow:none;background:#fff;border-radius:9px}
 .bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--line);font-size:10px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
@@ -1119,7 +1142,7 @@ details.drawer{grid-column:1/-1;padding:0}details.drawer>summary,details.discove
 #discovery{margin-top:10px}.discovery{padding:0 14px 14px}.discovery .grid{margin-top:0}.discovery-shell{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.seo-kpi .value{font-family:Georgia,"Times New Roman",serif;font-size:24px;margin-top:6px}.inbox{grid-column:1/-1}.inbox-controls{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:7px;align-items:center}.inbox-controls select,.inbox-controls input,.inbox-controls button,.index-select{border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.snapshot-list{display:grid;gap:6px;margin-top:8px}.snapshot-item{display:flex;justify-content:space-between;gap:12px;padding-top:6px;border-top:1px solid var(--line);font-size:10px}.drop-note{font-size:9px;color:var(--muted);line-height:1.55;margin-top:7px}.diagnostic{border-left:3px solid var(--accent)}.error{border:1px solid var(--accent);border-radius:10px;padding:12px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
 .sns-row{padding:12px 0;border-top:1px solid var(--line)}.sns-heading{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:8px}.sns-heading span{font-variant-numeric:tabular-nums}.sns-track{display:flex;height:18px;background:var(--soft);border-radius:4px;overflow:hidden}.sns-track span{height:100%}.sns-breakdown{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;margin-top:7px}.sns-note{font-size:12px;line-height:1.6;color:var(--muted);margin:8px 0}.sns-heading strong{min-width:0}.sns-heading span{flex-shrink:0}@media(max-width:390px){.sns-heading{flex-wrap:wrap}.sns-breakdown{gap:6px 10px}}
 footer{margin-top:16px;color:var(--muted);font-size:9px;line-height:1.6}
-@media(max-width:980px){.kpi,.seo-kpi{grid-column:span 4}.health{grid-column:span 4}.primary-chart,.summary-chart{grid-column:span 6}.inbox-controls{grid-template-columns:1fr}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1240px);padding-top:18px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half,.primary-chart,.summary-chart{grid-column:1/-1}.donut-grid{grid-template-columns:100px minmax(0,1fr)}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}.detail-grid>.card{grid-column:1/-1}}@media(max-width:390px){main{width:calc(100% - 14px)}.actions{gap:4px}.actions button{padding:6px 8px}.seo-kpi,.health{grid-column:1/-1}details.drawer>summary,details.discovery-shell>summary{align-items:flex-start;flex-direction:column}.drawer-meta{line-height:1.5}}
+@media(max-width:980px){.kpi,.seo-kpi{grid-column:span 4}.health{grid-column:span 4}.primary-chart,.summary-chart{grid-column:span 6}.inbox-controls{grid-template-columns:1fr}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1240px);padding-top:18px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.host-grid{grid-template-columns:1fr}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half,.primary-chart,.summary-chart{grid-column:1/-1}.donut-grid{grid-template-columns:100px minmax(0,1fr)}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}.detail-grid>.card{grid-column:1/-1}}@media(max-width:390px){main{width:calc(100% - 14px)}.actions{gap:4px}.actions button{padding:6px 8px}.seo-kpi,.health{grid-column:1/-1}details.drawer>summary,details.discovery-shell>summary{align-items:flex-start;flex-direction:column}.drawer-meta{line-height:1.5}}
 .campaign-form{grid-template-columns:repeat(3,minmax(0,1fr))}.campaign-form label{min-width:0;font-size:11px}.campaign-form label input{display:block;width:100%;box-sizing:border-box;margin-top:4px}.campaign-item span{min-width:0;overflow-wrap:anywhere}#campaignCompare{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:12px 0}#campaignCompare select{max-width:100%;padding:6px}#campaignCompare label{min-width:0;max-width:100%}#campaignResult{font-size:12px;line-height:1.5;overflow-wrap:anywhere}#campaignResult th,#campaignResult td{padding:7px 4px;white-space:normal}@media(max-width:760px){.campaign-form{grid-template-columns:minmax(0,1fr)}}
 </style>
 </head>
@@ -1164,7 +1187,7 @@ function rows(items,max=8){
     return '<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+width+'%"></div></div></div>';
   }).join("");
 }
-const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",YouTube:"#a33b32",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
+const COLORS={pageviews:"#181716",visits:"#8d2c23",newHost:"#13766e",legacyHost:"#9a7b4f",X:"#315c3d",YouTube:"#a33b32",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
 function bucketTime(value){
   if(!value)return NaN;
   if(/^\\d{4}-\\d{2}-\\d{2}$/.test(value))return new Date(value+"T00:00:00Z").getTime();
@@ -1177,6 +1200,15 @@ function bucketLabel(value){
     ?{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Tokyo"}
     :{month:"numeric",day:"numeric",timeZone:"Asia/Tokyo"};
   return new Intl.DateTimeFormat("ja-JP",opts).format(new Date(t));
+}
+function hostTrendPoints(current,legacy){
+  const points=new Map();
+  const add=(items,key)=>items.forEach(item=>{
+    const point=points.get(item.bucket)||{bucket:item.bucket,newVisits:0,legacyVisits:0};
+    point[key]+=Number(item.visits||0);points.set(item.bucket,point);
+  });
+  add(current||[],"newVisits");add(legacy||[],"legacyVisits");
+  return [...points.values()].sort((a,b)=>String(a.bucket).localeCompare(String(b.bucket)));
 }
 const HOST_MIGRATION = ${JSON.stringify(HOST_MIGRATION)};
 function lineChart(points,series,campaigns=[],hostMigration=false){
@@ -1463,6 +1495,8 @@ function render(data){
   window.__vaWindowStart=data.windowStart;
   window.__vaWindowEnd=data.windowEnd;
   const c=data.current,p=data.previous;
+  const legacy=data.legacy||{};
+  const lc=legacy.current||{pageviews:0,visits:0,pages:[],channels:[],referrers:[],flows:[],countries:[],devices:[]};
   document.getElementById("period").textContent=data.windowLabel || windowKey;
   document.getElementById("updated").textContent='更新 '+new Date(data.generatedAt).toLocaleString("ja-JP");
   const xNow=c.channels.find(x=>x.name==="X")?.visits||0;
@@ -1473,6 +1507,8 @@ function render(data){
   const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation"&&x.sourceCleanPath!==x.destinationPath);
   const campaigns=getCampaigns();
   const trend=data.trend||[];
+  const legacyTrend=legacy.trend||[];
+  const transitionTrend=hostTrendPoints(trend,legacyTrend);
   const pagesPerVisit=c.visits?c.pageviews/c.visits:0;
   const watchEntry=c.pages.filter(x=>["Basis Alarm","Pierce Duofon","Cyma Time-O-Vox"].includes(x.name)).reduce((s,x)=>s+x.visits,0);
   const watchShare=c.visits?(watchEntry/c.visits)*100:0;
@@ -1491,19 +1527,25 @@ function render(data){
   ).join("");
   const lowSample=c.visits<30?'<section class="card low-sample"><strong>LOW SAMPLE</strong><span>'+n(c.visits)+' visits · まだ傾向断定は保留</span></section>':'';
   const trafficSeries=[{key:"pageviews",label:"Page views",color:COLORS.pageviews},{key:"visits",label:"Visits",color:COLORS.visits}];
+  const hostSeries=[{key:"newVisits",label:"NEW · "+data.host,color:COLORS.newHost},{key:"legacyVisits",label:"OLD · "+(legacy.host||HOST_MIGRATION.oldHost),color:COLORS.legacyHost}];
   const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"youtube",label:"YouTube",color:COLORS.YouTube},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"instagram",label:"Instagram",color:channelColor("Instagram")},{key:"facebook",label:"Facebook",color:channelColor("Facebook")},{key:"otherSns",label:"Other SNS",color:channelColor("Other SNS")}];
   document.getElementById("content").innerHTML=
-  '<div class="path">'+esc(HOST_MIGRATION.note)+' 集計ホスト: '+esc(data.host)+'</div>'+
+  '<div class="path">'+esc(HOST_MIGRATION.note)+'</div>'+
   '<div class="grid analytics-grid">'+audit+lowSample+
-    '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
-    '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
+    '<section class="card host-scope"><div class="section-head"><div class="section-title">HOST SCOPE · SEPARATE MEASUREMENT</div><span>新旧を合算しません</span></div><div class="host-grid">'+
+      '<div class="host-block"><span class="path">NEW · '+esc(data.host)+'</span><strong>'+n(c.visits)+' visits</strong><div class="delta">'+n(c.pageviews)+' page views · '+esc(data.windowLabel||windowKey)+'</div></div>'+
+      '<div class="host-block"><span class="path">OLD · '+esc(legacy.host||HOST_MIGRATION.oldHost)+'</span><strong>'+n(lc.visits)+' visits</strong><div class="delta">'+n(lc.pageviews)+' page views · '+esc(data.windowLabel||windowKey)+'</div></div>'+
+    '</div></section>'+
+    '<section class="card kpi"><div class="label">NEW VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
+    '<section class="card kpi"><div class="label">NEW PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">X VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
     '<section class="card kpi"><div class="label">PAGES / VISIT</div><div class="value">'+pagesPerVisit.toFixed(2)+'</div><div class="delta">回遊の粗い指標</div></section>'+
     '<section class="card kpi"><div class="label">WATCH ENTRY SHARE</div><div class="value">'+watchShare.toFixed(0)+'%</div><div class="delta">全流入 '+n(c.visits)+'件中 '+n(watchEntry)+'件</div></section>'+
-    '<section class="card primary-chart"><div class="section-head"><div class="section-title">TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns,true)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
+    '<section class="card chart-card"><div class="section-head"><div class="section-title">HOST TRANSITION · VISITS</div><span>旧・新を別系列で表示</span></div>'+lineChart(transitionTrend,hostSeries,campaigns,true)+((data.trendWarning||legacy.trendWarning)?'<div class="path">'+esc([data.trendWarning,legacy.trendWarning].filter(Boolean).join(" / "))+'</div>':'')+'</section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">NEW HOST TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns,true)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
     '<section class="card summary-chart"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
-    '<section class="card primary-chart"><div class="section-head"><div class="section-title">ACQUISITION TREND</div><span>流入元別の入口回数</span></div>'+lineChart(trend,acquisitionSeries,campaigns,true)+'</section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">NEW HOST ACQUISITION TREND</div><span>流入元別の入口回数</span></div>'+lineChart(trend,acquisitionSeries,campaigns,true)+'</section>'+
     '<section class="card summary-chart"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SNS → WATCH ENTRY</div><span>判別できたSNS流入の着地先</span></div>'+snsEntryChart(c.snsEntries)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div>'+flowVisual(internalFlows)+'</section>'+
@@ -1512,6 +1554,10 @@ function render(data){
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
     '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS / PV</div></div>'+rows(c.channels,10)+'</section>'+
+    '<details class="card drawer raw"><summary><span>LEGACY HOST DETAILS</span><span class="drawer-meta">'+esc(legacy.host||HOST_MIGRATION.oldHost)+' · 別計測</span></summary><div class="drawer-content detail-grid">'+
+      '<section class="card pages"><div class="section-head"><div class="section-title">OLD HOST PAGES</div><span>'+n(lc.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+lc.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+'</tbody></table></section>'+
+      '<section class="card channels"><div class="section-head"><div class="section-title">OLD HOST CHANNELS / PV</div></div>'+rows(lc.channels,10)+'</section>'+
+    '</div></details>'+
     '<details class="card drawer raw"><summary><span>RAW / AUDIT TABLES</span><span class="drawer-meta">流入元・内部遷移・国・端末の詳細</span></summary><div class="drawer-content detail-grid">'+
     '<section class="card flow"><div class="section-head"><div class="section-title">ENTRY SOURCE → PAGE</div><span>同一行で取得</span></div><table><thead><tr><th>SOURCE</th><th></th><th>DESTINATION</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+flowRows(entryFlows)+'</tbody></table></section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div><table><thead><tr><th>FROM</th><th></th><th>TO</th><th class="num">PV</th><th class="num">VISITS</th></tr></thead><tbody>'+flowRows(internalFlows,true)+'</tbody></table></section>'+
