@@ -4,7 +4,7 @@ compatibility_date = "2026-09-08"
 workers_dev = true
 
 [vars]
-REQUEST_HOST = "orima1995-create.github.io"
+REQUEST_HOST = "vintagealarm.github.io"
 
 # Secrets are intentionally not committed.
 # Set them after deployment:
