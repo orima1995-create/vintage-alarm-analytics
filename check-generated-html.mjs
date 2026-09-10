@@ -1,5 +1,5 @@
 import vm from "node:vm";
-import worker, { aggregateSnsEntries, campaignWindow, campaignSummary, parseYouTubeVideoUrl } from "./worker.js";
+import worker, { aggregateSnsEntries, campaignWindow, campaignSummary, mergePeriodData, mergeTrendPoints, parseYouTubeVideoUrl, splitPeriod } from "./worker.js";
 import assert from "node:assert/strict";
 
 const start = '2026-09-08T00:00:00Z';
@@ -61,6 +61,32 @@ assert.equal(aggregateSnsEntries([]).complete, true);
 assert.equal(aggregateSnsEntries(undefined).complete, false);
 assert.equal(aggregateSnsEntries(Array.from({ length: 1000 }, () => entry("/", "t.co", 1))).complete, false);
 
+const thirtyDayRanges = splitPeriod("2026-08-11T12:00:00Z", "2026-09-10T12:00:00Z");
+assert.equal(thirtyDayRanges.length, 5);
+assert.equal(thirtyDayRanges[0].start.toISOString(), "2026-08-11T12:00:00.000Z");
+assert.equal(thirtyDayRanges.at(-1).end.toISOString(), "2026-09-10T12:00:00.000Z");
+assert.ok(thirtyDayRanges.every((range, index) =>
+  range.end - range.start <= 7 * 24 * 60 * 60 * 1000 &&
+  (!index || range.start.getTime() === thirtyDayRanges[index - 1].end.getTime())
+));
+const periodPart = (count, visits, path) => ({ viewer: { accounts: [{
+  total: [{ count, sum: { visits } }],
+  pages: [{ count, sum: { visits }, dimensions: { requestPath: path } }],
+  referers: [], flows: [], entries: [], countries: [], devices: [],
+}] } });
+const mergedPeriod = mergePeriodData([periodPart(20, 20, "/"), periodPart(6, 6, "/")]);
+assert.equal(mergedPeriod.viewer.accounts[0].total[0].count, 26);
+assert.equal(mergedPeriod.viewer.accounts[0].total[0].sum.visits, 26);
+assert.equal(mergedPeriod.viewer.accounts[0].pages[0].count, 26);
+const mergedTrend = mergeTrendPoints([
+  [{ bucket: "2026-09-09", pageviews: 20, visits: 20, x: 0 }],
+  [{ bucket: "2026-09-09", pageviews: 2, visits: 2, x: 1 }, { bucket: "2026-09-10", pageviews: 4, visits: 4, x: 1 }],
+]);
+assert.deepEqual(mergedTrend.map(point => [point.bucket, point.pageviews, point.visits, point.x]), [
+  ["2026-09-09", 22, 22, 1],
+  ["2026-09-10", 4, 4, 1],
+]);
+
 const password = "ci-test-password";
 const auth = Buffer.from(`admin:${password}`).toString("base64");
 const response = await worker.fetch(
@@ -97,19 +123,23 @@ const dashboardScript = scripts.join("\n");
 const chartSource = dashboardScript.slice(dashboardScript.indexOf('const HOST_MIGRATION ='), dashboardScript.indexOf('function entryBars('));
 assert.ok(chartSource.includes('function lineChart('));
 const chartContext = vm.createContext({
-  window: { __vaWindowStart: '2026-09-09T00:00:00Z', __vaWindowEnd: '2026-09-11T00:00:00Z' },
+  window: { __vaWindowStart: '2026-09-03T00:00:00Z', __vaWindowEnd: '2026-09-10T14:00:00Z' },
   bucketTime: v => Date.parse(v), bucketLabel: v => v, esc: v => String(v),
   COLORS: { X: '#111', YouTube: '#f00' }
 });
 vm.runInContext(chartSource, chartContext);
 const chart = vm.runInContext('lineChart', chartContext);
-const points = [{ bucket: '2026-09-09T00:00:00Z', visits: 1 }, { bucket: '2026-09-11T00:00:00Z', visits: 2 }];
+const points = [{ bucket: '2026-09-03T00:00:00Z', visits: 1 }, { bucket: '2026-09-10T00:00:00Z', visits: 2 }];
 const series = [{ key: 'visits', label: 'Visits', color: '#111' }];
-const campaigns = [{ linkAddedAt: '2026-09-10T06:00:00Z', platform: 'YouTube', label: 'VIDEO' }, { linkAddedAt: '2026-09-10T07:00:00Z', platform: 'X', label: 'POST' }];
+const campaigns = [{ linkAddedAt: '2026-09-09T16:00:00Z', platform: 'YouTube', label: 'VIDEO' }, { linkAddedAt: '2026-09-09T17:00:00Z', platform: 'X', label: 'POST' }];
 const marked = chart(points, series, campaigns, true);
 assert.ok(marked.includes('HOST MIGRATION'));
 assert.ok(marked.includes('YT · VIDEO'));
 assert.ok(marked.includes('X · POST'));
+const markerLabels = [...marked.matchAll(/<text data-event-marker="label"[^>]*y="([^"]+)"[^>]*text-anchor="([^"]+)"/g)];
+assert.equal(markerLabels.length, 3);
+assert.equal(new Set(markerLabels.map(match => match[1])).size, 3);
+assert.ok(markerLabels.every(match => match[2] === "end"));
 assert.equal(campaigns.length, 2); // Fixed events must never enter saved campaign records.
 assert.ok(!chart(points, series, campaigns).includes('HOST MIGRATION')); // Discovery charts are separate.
 chartContext.window.__vaWindowStart = '2026-09-11T00:00:00Z';

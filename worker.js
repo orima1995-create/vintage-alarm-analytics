@@ -509,7 +509,70 @@ function normalizeWindow(value) {
   return windows[value] || windows["7d"];
 }
 
+const ANALYTICS_CHUNK_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function splitPeriod(start, end, maxMs = ANALYTICS_CHUNK_MS) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(maxMs) || maxMs <= 0) {
+    throw new Error("Invalid analytics period.");
+  }
+
+  const ranges = [];
+  for (let cursor = startMs; cursor < endMs; cursor += maxMs) {
+    ranges.push({
+      start: new Date(cursor),
+      end: new Date(Math.min(cursor + maxMs, endMs)),
+    });
+  }
+  return ranges;
+}
+
+function mergeGroupedRows(accounts, field, dimensionKeys, limit) {
+  const rows = new Map();
+  for (const account of accounts) {
+    for (const row of account?.[field] || []) {
+      const dimensions = Object.fromEntries(dimensionKeys.map((key) => [key, row?.dimensions?.[key] || ""]));
+      const key = JSON.stringify(dimensions);
+      const current = rows.get(key) || { count: 0, sum: { visits: 0 }, dimensions };
+      current.count += Number(row?.count || 0);
+      current.sum.visits += Number(row?.sum?.visits || 0);
+      rows.set(key, current);
+    }
+  }
+  return [...rows.values()]
+    .sort((a, b) => (b.count - a.count) || (b.sum.visits - a.sum.visits))
+    .slice(0, limit);
+}
+
+export function mergePeriodData(parts) {
+  const accounts = parts.map((part) => part?.viewer?.accounts?.[0] || {});
+  const total = accounts.reduce((result, account) => {
+    const row = account.total?.[0];
+    result.count += Number(row?.count || 0);
+    result.sum.visits += Number(row?.sum?.visits || 0);
+    return result;
+  }, { count: 0, sum: { visits: 0 } });
+
+  return { viewer: { accounts: [{
+    total: [total],
+    pages: mergeGroupedRows(accounts, "pages", ["requestPath"], 100),
+    referers: mergeGroupedRows(accounts, "referers", ["refererHost", "refererPath"], 100),
+    flows: mergeGroupedRows(accounts, "flows", ["requestPath", "refererHost", "refererPath", "countryName", "deviceType"], 200),
+    entries: mergeGroupedRows(accounts, "entries", ["requestPath", "refererHost"], 1000),
+    countries: mergeGroupedRows(accounts, "countries", ["countryName"], 100),
+    devices: mergeGroupedRows(accounts, "devices", ["deviceType"], 30),
+  }] } };
+}
+
 async function fetchPeriod(env, host, start, end) {
+  const parts = await Promise.all(
+    splitPeriod(start, end).map((range) => fetchPeriodSlice(env, host, range.start, range.end)),
+  );
+  return parts.length === 1 ? parts[0] : mergePeriodData(parts);
+}
+
+async function fetchPeriodSlice(env, host, start, end) {
   const query = `
 query VintageAlarmAnalytics(
   $accountTag: string!
@@ -583,7 +646,7 @@ query VintageAlarmAnalytics(
       AND: [
         {
           datetime_geq: start.toISOString(),
-          datetime_leq: end.toISOString(),
+          datetime_lt: end.toISOString(),
         },
         { requestHost: host },
         { bot: 0 },
@@ -594,6 +657,7 @@ query VintageAlarmAnalytics(
 
 async function fetchTrend(env, host, start, end, windowSpec) {
   let lastError = null;
+  const ranges = splitPeriod(start, end);
 
   for (const bucketField of windowSpec.bucketCandidates) {
     const orderBy = bucketField + "_ASC";
@@ -628,23 +692,23 @@ query VintageAlarmTrend(
 `;
 
     try {
-      const data = await cloudflareGraphQL(env, query, {
-        accountTag: env.CF_ACCOUNT_ID,
-        filter: {
-          AND: [
-            {
-              datetime_geq: start.toISOString(),
-              datetime_leq: end.toISOString(),
-            },
-            { requestHost: host },
-            { bot: 0 },
-          ],
-        },
-      });
+      const data = await Promise.all(ranges.map((range) => cloudflareGraphQL(env, query, {
+          accountTag: env.CF_ACCOUNT_ID,
+          filter: {
+            AND: [
+              {
+                datetime_geq: range.start.toISOString(),
+                datetime_lt: range.end.toISOString(),
+              },
+              { requestHost: host },
+              { bot: 0 },
+            ],
+          },
+        })));
 
       return {
         bucketField,
-        points: normalizeTrend(data),
+        points: mergeTrendPoints(data.map(normalizeTrend)),
         warning: null,
       };
     } catch (error) {
@@ -657,6 +721,20 @@ query VintageAlarmTrend(
     points: [],
     warning: lastError instanceof Error ? lastError.message : "Trend data unavailable.",
   };
+}
+
+export function mergeTrendPoints(pointSets) {
+  const points = new Map();
+  for (const set of pointSets) {
+    for (const point of set || []) {
+      const current = points.get(point.bucket) || Object.fromEntries(Object.keys(point).map((key) => [key, key === "bucket" ? point.bucket : 0]));
+      for (const [key, value] of Object.entries(point)) {
+        if (key !== "bucket") current[key] = Number(current[key] || 0) + Number(value || 0);
+      }
+      points.set(point.bucket, current);
+    }
+  }
+  return [...points.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
 }
 
 function normalizeTrend(data) {
@@ -1126,16 +1204,24 @@ function lineChart(points,series,campaigns=[],hostMigration=false){
   }).join("");
   const tickIdx=[0,Math.floor((points.length-1)/4),Math.floor((points.length-1)/2),Math.floor((points.length-1)*3/4),points.length-1].filter((v,i,a)=>v>=0&&a.indexOf(v)===i);
   const ticks=tickIdx.map(i=>'<text x="'+xFor(points[i].bucket,i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="#706d67">'+esc(bucketLabel(points[i].bucket))+'</text>').join("");
-  const events=hostMigration ? [...campaigns,{linkAddedAt:HOST_MIGRATION.markerAt,label:"HOST MIGRATION",migration:true}] : campaigns;
+  const events=(hostMigration ? [...campaigns,{linkAddedAt:HOST_MIGRATION.markerAt,label:"HOST MIGRATION",migration:true}] : campaigns)
+    .map(item=>({...item,markerTime:new Date(item.linkAddedAt).getTime()}))
+    .filter(item=>item.linkAddedAt&&Number.isFinite(item.markerTime)&&Number.isFinite(start)&&Number.isFinite(end)&&end>start&&item.markerTime>=start&&item.markerTime<=end)
+    .sort((a,b)=>a.markerTime-b.markerTime);
+  const laneLastX=Array(6).fill(-Infinity);
   const markers=events.map(item=>{
-    if(!item.linkAddedAt)return "";
-    const mt=new Date(item.linkAddedAt).getTime();
-    if(!Number.isFinite(mt)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||mt<start||mt>end)return "";
-    const x=l+((mt-start)/(end-start))*iw;
+    const x=l+((item.markerTime-start)/(end-start))*iw;
+    let lane=laneLastX.findIndex(lastX=>x-lastX>=120);
+    if(lane<0)lane=laneLastX.indexOf(Math.min(...laneLastX));
+    laneLastX[lane]=x;
     const platform=item.platform==="YouTube"?"YouTube":"X";
     const color=item.migration?"#706d67":platform==="YouTube"?COLORS.YouTube:COLORS.X;
     const prefix=platform==="YouTube"?"YT":"X";
-    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+color+'" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="'+color+'">'+esc(item.migration?item.label:prefix+" · "+(item.label||"POST"))+'</text>';
+    const nearRight=x>w-r-150;
+    const labelX=nearRight?x-5:x+5;
+    const anchor=nearRight?"end":"start";
+    const label=esc(item.migration?item.label:prefix+" · "+(item.label||"POST"));
+    return '<line data-event-marker="line" x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+color+'" stroke-width="1" stroke-dasharray="4 4"/><text data-event-marker="label" x="'+labelX+'" y="'+(t+11+lane*13)+'" text-anchor="'+anchor+'" font-size="9" font-weight="700" fill="'+color+'" style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">'+label+'</text>';
   }).join("");
   const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
   return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+markers+ticks+'</svg></div>'+legend;
