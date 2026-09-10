@@ -1,22 +1,47 @@
 const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
-const DEFAULT_HOST = "orima1995-create.github.io";
-const BASE_PATH = "/orima1995-creator.github.io";
+const DEFAULT_HOST = "vintagealarm.github.io";
+export const HOST_MIGRATION = Object.freeze({
+  date: "2026-09-10",
+  markerAt: "2026-09-10T00:00:00+09:00",
+  precision: "day",
+  oldHost: "orima1995-create.github.io",
+  newHost: "vintagealarm.github.io",
+  note: "2026-09-10 HOST MIGRATION · 日付基準線（JST、切替時刻ではありません）。新旧ホストは別計測。移行前を含む期間の増減は同条件比較ではありません。"
+});
+const LEGACY_HOST = "orima1995-create.github.io";
+const LEGACY_BASE_PATH = "/orima1995-creator.github.io";
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Read-only export uses a short-lived signed URL so ChatGPT/web tools can
+    // fetch aggregate analytics without receiving the dashboard password.
+    if (url.pathname === "/api/ai-export") {
+      return aiExportResponse(request, url, env);
+    }
+
     const auth = requireBasicAuth(request, env);
     if (auth) return auth;
 
-    const url = new URL(request.url);
-
     if (url.pathname === "/api/analytics") {
       return analyticsResponse(url, env);
+    }
+    if (url.pathname === "/api/campaign") {
+      return campaignResponse(url, env);
+    }
+
+    if (url.pathname === "/api/ai-share-link") {
+      return aiShareLinkResponse(request, url, env);
     }
 
     if (url.pathname === "/api/x-preview") {
       return xPreviewResponse(url);
     }
 
+    if (url.pathname === "/api/youtube-preview") {
+      return youtubePreviewResponse(url);
+    }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return htmlResponse(DASHBOARD_HTML);
@@ -97,6 +122,61 @@ async function xPreviewResponse(url) {
   }
 }
 
+
+export function parseYouTubeVideoUrl(raw) {
+  const parsed = new URL(raw);
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  let videoId = "";
+  let kind = "video";
+  if (host === "youtu.be") {
+    videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+  } else if (host === "youtube.com" || host === "m.youtube.com") {
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] === "shorts" && parts[1]) {
+      videoId = parts[1];
+      kind = "shorts";
+    } else if (parts[0] === "embed" && parts[1]) {
+      videoId = parts[1];
+    } else if (parsed.pathname === "/watch") {
+      videoId = parsed.searchParams.get("v") || "";
+    }
+  } else {
+    throw new Error("YouTube URL only.");
+  }
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+    throw new Error("YouTube video URL format could not be recognized.");
+  }
+  return {
+    videoId,
+    kind,
+    canonicalUrl: kind === "shorts"
+      ? "https://www.youtube.com/shorts/" + videoId
+      : "https://www.youtube.com/watch?v=" + videoId,
+  };
+}
+async function youtubePreviewResponse(url) {
+  try {
+    const raw = url.searchParams.get("url") || "";
+    const parsed = parseYouTubeVideoUrl(raw);
+    const endpoint = new URL("https://www.youtube.com/oembed");
+    endpoint.searchParams.set("url", parsed.canonicalUrl);
+    endpoint.searchParams.set("format", "json");
+    const response = await fetch(endpoint.toString(), { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error("YouTube oEmbed HTTP " + response.status);
+    const data = await response.json();
+    return jsonResponse({
+      url: parsed.canonicalUrl,
+      videoId: parsed.videoId,
+      kind: parsed.kind,
+      title: data.title || "",
+      authorName: data.author_name || "",
+      authorUrl: data.author_url || "",
+    });
+  } catch (error) {
+    return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+}
+
 function extractPostText(html) {
   const match = String(html).match(/<p[^>]*>([\s\S]*?)<\/p>/i);
   if (!match) return "";
@@ -117,6 +197,189 @@ function decodeHtmlText(value) {
     .replace(/&nbsp;/g, " ")
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+}
+
+const AI_EXPORT_MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
+const AI_EXPORT_MIN_TTL_SECONDS = 5 * 60;
+
+async function aiShareLinkResponse(request, url, env) {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "GET only." }, 405);
+  }
+
+  try {
+    requireEnv(env, "DASHBOARD_PASSWORD");
+
+    const windowSpec = normalizeWindow(url.searchParams.get("window"));
+    const requestedTtl = Number(url.searchParams.get("ttl") || 24 * 60 * 60);
+    const ttlSeconds = Math.min(
+      AI_EXPORT_MAX_TTL_SECONDS,
+      Math.max(
+        AI_EXPORT_MIN_TTL_SECONDS,
+        Number.isFinite(requestedTtl) ? Math.floor(requestedTtl) : 24 * 60 * 60,
+      ),
+    );
+    const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
+    const signature = await signAiExport(
+      env,
+      windowSpec.key,
+      expires,
+    );
+
+    const shareUrl = new URL("/api/ai-export", url.origin);
+    shareUrl.searchParams.set("window", windowSpec.key);
+    shareUrl.searchParams.set("expires", String(expires));
+    shareUrl.searchParams.set("sig", signature);
+
+    return jsonResponse({
+      url: shareUrl.toString(),
+      windowKey: windowSpec.key,
+      expiresAt: new Date(expires * 1000).toISOString(),
+      ttlSeconds,
+      scope: "aggregate analytics read-only",
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: error instanceof Error ? error.message : String(error) },
+      500,
+    );
+  }
+}
+
+async function aiExportResponse(request, url, env) {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "GET only." }, 405);
+  }
+
+  try {
+    requireEnv(env, "DASHBOARD_PASSWORD");
+
+    const windowSpec = normalizeWindow(url.searchParams.get("window"));
+    const expires = Number(url.searchParams.get("expires"));
+    const signature = String(url.searchParams.get("sig") || "");
+
+    if (!Number.isInteger(expires) || !signature) {
+      return jsonResponse({ error: "Signed export URL required." }, 401);
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (expires <= nowSeconds) {
+      return jsonResponse({ error: "Signed export URL expired." }, 410);
+    }
+    if (expires - nowSeconds > AI_EXPORT_MAX_TTL_SECONDS) {
+      return jsonResponse({ error: "Signed export URL exceeds maximum TTL." }, 401);
+    }
+
+    const expected = await signAiExport(
+      env,
+      windowSpec.key,
+      expires,
+    );
+    if (!timingSafeHexEqual(signature, expected)) {
+      return jsonResponse({ error: "Invalid export signature." }, 401);
+    }
+
+    const response = await analyticsResponse(url, env);
+    const payload = await response.json();
+    if (!response.ok) return jsonResponse(payload, response.status);
+
+    return jsonResponse({
+      schemaVersion: "vintage-alarm-ai-export-v1",
+      generatedAt: payload.generatedAt,
+      windowKey: payload.windowKey,
+      windowLabel: payload.windowLabel,
+      windowStart: payload.windowStart,
+      windowEnd: payload.windowEnd,
+      host: payload.host,
+      hostMigration: payload.hostMigration,
+      current: aiExportPeriod(payload.current),
+      previous: aiExportPeriod(payload.previous),
+      trend: payload.trend,
+      trendBucket: payload.trendBucket,
+      trendWarning: payload.trendWarning,
+      limitations: {
+        searchConsole:
+          "Not included: Search Console / Google AI snapshots currently live only in dashboard browser localStorage.",
+        privacy:
+          "Aggregate Cloudflare Web Analytics only; no IP addresses, cookies, or raw user-agent strings are exported.",
+        attribution:
+          "X/YouTube/SNS referrer paths can help diagnosis but do not guarantee post-level attribution.",
+      },
+    });
+  } catch (error) {
+    return jsonResponse(
+      { error: error instanceof Error ? error.message : String(error) },
+      500,
+    );
+  }
+}
+
+function aiExportPeriod(period) {
+  const flows = Array.isArray(period?.flows) ? period.flows : [];
+  return {
+    pageviews: period?.pageviews || 0,
+    visits: period?.visits || 0,
+    pages: period?.pages || [],
+    entryPages: [...(period?.pages || [])]
+      .filter((page) => (page?.visits || 0) > 0)
+      .sort((a, b) => (b.visits - a.visits) || (b.pageviews - a.pageviews)),
+    channels: period?.channels || [],
+    referrers: period?.referrers || [],
+    externalEntryFlows: flows.filter(
+      (flow) => flow.channel !== "Internal Navigation" && (flow.visits || 0) > 0,
+    ),
+    internalFlows: flows.filter(
+      (flow) => flow.channel === "Internal Navigation" && (flow.pageviews || 0) > 0,
+    ),
+    snsEntries: period?.snsEntries || { pages: [], total: 0, complete: false },
+    countries: period?.countries || [],
+    devices: period?.devices || [],
+  };
+}
+
+async function signAiExport(env, windowKey, expires) {
+  requireEnv(env, "DASHBOARD_PASSWORD");
+  requireEnv(env, "CF_API_TOKEN");
+
+  // Derive a dedicated signing key from two Worker-only secrets. This avoids
+  // exposing either secret and prevents a signed URL from becoming a simple
+  // offline oracle for the Basic Auth password alone.
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(
+      "vintage-alarm-ai-export-kdf-v1\u0000" +
+      env.DASHBOARD_PASSWORD +
+      "\u0000" +
+      env.CF_API_TOKEN,
+    ),
+  );
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyMaterial,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const message = encoder.encode(
+    "vintage-alarm-ai-export:" + windowKey + ":" + expires,
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, message);
+  return [...new Uint8Array(signature)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function timingSafeHexEqual(left, right) {
+  const a = String(left || "").toLowerCase();
+  const b = String(right || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(a) || !/^[0-9a-f]{64}$/.test(b)) return false;
+
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 async function analyticsResponse(url, env) {
@@ -143,6 +406,7 @@ async function analyticsResponse(url, env) {
       windowStart: currentStart.toISOString(),
       windowEnd: now.toISOString(),
       host,
+      hostMigration: HOST_MIGRATION,
       current: normalizePeriod(current),
       previous: normalizePeriod(previous),
       trend: trendResult.points,
@@ -161,6 +425,52 @@ async function analyticsResponse(url, env) {
 
 function requireEnv(env, key) {
   if (!env[key]) throw new Error(`${key} is not configured.`);
+}
+
+export function campaignWindow(start, hours, now = Date.now()) {
+  const anchor = Date.parse(start);
+  const duration = Number(hours) * 3600000;
+  if (!Number.isFinite(anchor) || ![1, 24, 72].includes(Number(hours)) || anchor >= now) {
+    throw new Error("施策開始日時は過去の日時、比較期間は1・24・72時間を指定してください。");
+  }
+  const elapsed = Math.min(duration, now - anchor);
+  return { beforeStart: new Date(anchor - elapsed).toISOString(), start: new Date(anchor).toISOString(),
+    end: new Date(anchor + elapsed).toISOString(), complete: elapsed === duration, elapsedHours: elapsed / 3600000 };
+}
+
+export function campaignSummary(data, target, platform = "X") {
+  const account = data?.viewer?.accounts?.[0] || {};
+  if (!Array.isArray(account.entries) || !Array.isArray(account.flows)) throw new Error("比較データを取得できませんでした。");
+  const channel = platform === "YouTube" ? "YouTube" : "X";
+  const entries = account.entries;
+  const flows = normalizePeriod(data).flows;
+  const platformEntries = entries.filter(x => classifyReferrer(x.dimensions?.refererHost || "") === channel).reduce((s,x) => s + (x.sum?.visits || 0), 0);
+  const targetEntries = entries.filter(x => classifyReferrer(x.dimensions?.refererHost || "") === channel && cleanPath(x.dimensions?.requestPath || "/") === target).reduce((s,x) => s + (x.sum?.visits || 0), 0);
+  return {
+    platform,
+    platformEntries,
+    xEntries: channel === "X" ? platformEntries : 0,
+    youtubeEntries: channel === "YouTube" ? platformEntries : 0,
+    targetEntries,
+    nextPages: flows.filter(x => x.channel === "Internal Navigation" && x.sourceCleanPath === target && x.destinationPath !== target).reduce((s,x) => s + x.pageviews, 0),
+    possiblyTruncated: entries.length >= 1000 || account.flows.length >= 200
+  };
+}
+async function campaignResponse(url, env) {
+  let bounds;
+  try { bounds = campaignWindow(url.searchParams.get("start"), url.searchParams.get("hours")); }
+  catch (error) { return jsonResponse({ error: error.message }, 400); }
+  try {
+    requireEnv(env, "CF_API_TOKEN"); requireEnv(env, "CF_ACCOUNT_ID");
+    const host = env.REQUEST_HOST || DEFAULT_HOST;
+    const target = cleanPath(url.searchParams.get("target") || "/");
+    const platform = url.searchParams.get("platform") === "YouTube" ? "YouTube" : "X";
+    const [before, after] = await Promise.all([
+      fetchPeriod(env, host, new Date(bounds.beforeStart), new Date(Date.parse(bounds.start) - 1)),
+      fetchPeriod(env, host, new Date(bounds.start), new Date(Date.parse(bounds.end) - 1))
+    ]);
+    return jsonResponse({ ...bounds, target, platform, before: campaignSummary(before, target, platform), after: campaignSummary(after, target, platform) });
+  } catch (error) { return jsonResponse({ error: error.message }, 500); }
 }
 
 function normalizeWindow(value) {
@@ -237,6 +547,14 @@ query VintageAlarmAnalytics(
         count
         sum { visits }
         dimensions { requestPath refererHost refererPath countryName deviceType }
+      }
+      entries: rumPageloadEventsAdaptiveGroups(
+        filter: $filter
+        limit: 1000
+        orderBy: [count_DESC]
+      ) {
+        sum { visits }
+        dimensions { requestPath refererHost }
       }
       countries: rumPageloadEventsAdaptiveGroups(
         filter: $filter
@@ -353,6 +671,7 @@ function normalizeTrend(data) {
         pageviews: 0,
         visits: 0,
         x: 0,
+        youtube: 0,
         instagram: 0,
         facebook: 0,
         otherSns: 0,
@@ -377,6 +696,7 @@ function normalizeTrend(data) {
     const visits = row?.sum?.visits || 0;
 
     if (channel === "X") point.x += visits;
+    else if (channel === "YouTube") point.youtube += visits;
     else if (channel === "Instagram") point.instagram += visits;
     else if (channel === "Facebook") point.facebook += visits;
     else if (channel === "Other SNS") point.otherSns += visits;
@@ -452,6 +772,7 @@ function normalizePeriod(data) {
     referrers: rawReferers,
     flows: buildFlows(rawFlows),
     channels: buildChannels(rawReferers),
+    snsEntries: aggregateSnsEntries(account.entries),
     countries: (account.countries || []).map((row) => ({
       name: friendlyCountry(row?.dimensions?.countryName || "Unknown"),
       pageviews: row?.count || 0,
@@ -474,10 +795,32 @@ const PAGE_NAMES = Object.freeze({
   "/history/smartwatch/": "Smartwatch / HISTORY",
 });
 
+export function aggregateSnsEntries(rows) {
+  const channels = ["X", "Instagram", "Facebook", "Other SNS"];
+  const pages = [
+    ["/cyma-time-o-vox/", "Cyma Time-O-Vox"],
+    ["/pierce-duofon/", "Pierce Duofon"],
+    ["/basis-alarm/", "Basis Alarm"],
+    ["other", "Other pages"],
+  ].map(([path, name]) => ({ path, name, values: Object.fromEntries(channels.map(c => [c, 0])), total: 0 }));
+  for (const row of rows || []) {
+    const channel = classifyReferrer(row?.dimensions?.refererHost);
+    if (!channels.includes(channel)) continue;
+    const path = cleanPath(row?.dimensions?.requestPath);
+    const page = pages.find(p => p.path === path) || pages[3];
+    const value = Number(row?.sum?.visits || 0);
+    page.values[channel] += value;
+    page.total += value;
+  }
+  return { pages, total: pages.reduce((sum, p) => sum + p.total, 0), complete: Array.isArray(rows) && rows.length < 1000 };
+}
+
 function cleanPath(path) {
   let out = String(path || "/").split(/[?#]/)[0];
   try { out = decodeURIComponent(out); } catch {}
-  if (out.startsWith(BASE_PATH)) out = out.slice(BASE_PATH.length) || "/";
+  if (out === LEGACY_BASE_PATH || out.startsWith(LEGACY_BASE_PATH + "/")) {
+    out = out.slice(LEGACY_BASE_PATH.length) || "/";
+  }
   if (!out.startsWith("/")) out = "/" + out;
   out = out.replace(/\/{2,}/g, "/");
   if (out !== "/" && !out.endsWith("/") && !out.split("/").pop().includes(".")) out += "/";
@@ -531,6 +874,7 @@ function buildFlows(rows) {
 function buildChannels(rows) {
   const channels = {
     "X": { pageviews: 0, visits: 0 },
+    "YouTube": { pageviews: 0, visits: 0 },
     "Instagram": { pageviews: 0, visits: 0 },
     "Facebook": { pageviews: 0, visits: 0 },
     "Other SNS": { pageviews: 0, visits: 0 },
@@ -554,7 +898,12 @@ function buildChannels(rows) {
 function classifyReferrer(host) {
   const value = String(host || "").toLowerCase();
   if (!value) return "Direct / Unknown";
-  if (value === DEFAULT_HOST || value.endsWith("." + DEFAULT_HOST)) return "Internal Navigation";
+  if (
+    value === DEFAULT_HOST ||
+    value.endsWith("." + DEFAULT_HOST) ||
+    value === LEGACY_HOST ||
+    value.endsWith("." + LEGACY_HOST)
+  ) return "Internal Navigation";
 
   if (
     value === "x.com" ||
@@ -563,6 +912,14 @@ function classifyReferrer(host) {
     value.endsWith(".twitter.com") ||
     value === "t.co"
   ) return "X";
+
+  if (
+    value === "youtu.be" ||
+    value.endsWith(".youtu.be") ||
+    value === "youtube.com" ||
+    value.endsWith(".youtube.com") ||
+    value.includes("youtube-nocookie.com")
+  ) return "YouTube";
 
   if (value.includes("instagram.com")) return "Instagram";
   if (value.includes("facebook.com")) return "Facebook";
@@ -648,40 +1005,44 @@ const DASHBOARD_HTML = `<!doctype html>
 <meta name="robots" content="noindex,nofollow,noarchive">
 <title>VINTAGE ALARM ANALYTICS</title>
 <style>
-:root{--paper:#f2eee5;--ink:#181716;--muted:#706d67;--line:#c8c0b3;--card:#faf7f0;--accent:#8d2c23;--green:#315c3d;--blue:#365f7d;--gold:#9a7b4f;--violet:#7b5674;--soft:#e7dfd2}
+:root{--paper:#f1f4f1;--ink:#17201f;--muted:#687471;--line:#d6ddda;--card:#fbfcfb;--accent:#963c33;--green:#13766e;--blue:#426d87;--gold:#9a7b4f;--violet:#7b5674;--soft:#e8eeeb;--shadow:0 5px 18px rgba(31,52,48,.055)}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif}
-main{width:min(1120px,calc(100% - 32px));margin:0 auto;padding:34px 0 64px}
-header{display:flex;gap:18px;align-items:flex-end;justify-content:space-between;border-bottom:1px solid var(--ink);padding-bottom:16px}
-.eyebrow{font-size:11px;letter-spacing:.18em;color:var(--muted);font-weight:700}
-h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(26px,5vw,42px);font-weight:500;letter-spacing:.02em;margin:5px 0 0}
-.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-button{appearance:none;border:1px solid var(--line);background:transparent;color:var(--ink);padding:8px 12px;font:inherit;font-size:12px;cursor:pointer}
+main{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:26px 0 48px}
+header{display:flex;gap:18px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ink);padding-bottom:12px}
+.eyebrow{font-size:10px;letter-spacing:.2em;color:var(--green);font-weight:800}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(25px,4vw,36px);font-weight:500;letter-spacing:.015em;margin:4px 0 0}
+.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+button{appearance:none;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--ink);padding:7px 10px;font:inherit;font-size:11px;cursor:pointer}
+button:hover{border-color:var(--green)}
 button.active{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 button.refresh{border-color:var(--ink)}
-.status{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;margin:12px 0 20px}
-.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
-.card{background:var(--card);border:1px solid var(--line);padding:16px;min-width:0}
+.status{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:10px;margin:9px 0 12px}
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:14px;min-width:0}
 .kpi{grid-column:span 2}
-.kpi .label,.section-title{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);font-weight:700}
-.kpi .value{font-family:Georgia,"Times New Roman",serif;font-size:36px;margin-top:7px}
-.delta{font-size:11px;margin-top:4px;color:var(--muted)}
+.kpi .label,.section-title{font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);font-weight:800}
+.kpi .value{font-family:Georgia,"Times New Roman",serif;font-size:30px;line-height:1;margin-top:8px}
+.delta{font-size:10px;margin-top:6px;color:var(--muted)}
 .delta.up{color:#315c3d}.delta.down{color:var(--accent)}
 .pages{grid-column:span 7}.channels{grid-column:span 5}.referrers{grid-column:1/-1}.half{grid-column:span 6}
-.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-table{width:100%;border-collapse:collapse;font-size:12px}
-th,td{text-align:left;padding:9px 6px;border-top:1px solid #ded7cc;vertical-align:top}
-th{font-size:10px;color:var(--muted);font-weight:600}
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}.section-head>span{font-size:10px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{text-align:left;padding:7px 5px;border-top:1px solid var(--line);vertical-align:top}
+th{font-size:9px;color:var(--muted);font-weight:700}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-.path{display:block;color:var(--muted);font-size:10px;margin-top:2px;overflow-wrap:anywhere}
+.path{display:block;color:var(--muted);font-size:9px;margin-top:2px;overflow-wrap:anywhere}
 .flag{display:inline-block;margin-left:6px;padding:2px 5px;border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:.08em}
-.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.chart-card{grid-column:1/-1}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 0;font-size:10px;color:var(--muted)}.legend-dot{width:8px;height:8px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center}.entry-bar{display:grid;grid-template-columns:minmax(120px,1fr) 3fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #ded7cc;font-size:12px}.entry-track,.flow-track{height:7px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--ink)}.donut-grid{display:grid;grid-template-columns:160px minmax(0,1fr);gap:22px;align-items:center}.donut{width:150px;height:150px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:28px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:27px}.mix-list{display:grid;gap:7px;font-size:11px}.mix-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:7px;align-items:center}.flow-viz{display:grid;gap:8px}.flow-viz-row{display:grid;grid-template-columns:minmax(110px,1fr) auto minmax(110px,1fr) 2fr auto;gap:8px;align-items:center;font-size:11px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px}.funnel-step{border:1px solid var(--line);padding:10px;min-height:74px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:24px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:7px;margin-top:14px}.campaign-form input,.campaign-form button{min-width:0;border:1px solid var(--line);background:transparent;padding:8px;font:inherit;font-size:11px}.campaign-list{margin-top:10px;display:grid;gap:6px;font-size:11px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #ded7cc;padding-top:7px}.muted{color:var(--muted)}details.raw{grid-column:1/-1}details.raw summary{cursor:pointer;font-size:11px;letter-spacing:.1em;color:var(--muted)}
-.bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid #ded7cc;font-size:12px}
+.flow{grid-column:1/-1}.audit{grid-column:1/-1;border-color:var(--accent);color:var(--accent)}.chart-card{grid-column:1/-1}.primary-chart{grid-column:span 8}.summary-chart{grid-column:span 4}.chart-half{grid-column:span 6}.chart-wrap{width:100%;overflow:hidden}.chart-wrap svg{display:block;max-height:205px}.chart-legend{display:flex;gap:12px;flex-wrap:wrap;margin:5px 0 0;font-size:9px;color:var(--muted)}.legend-dot{width:7px;height:7px;border-radius:999px;display:inline-block;margin-right:5px}.low-sample{grid-column:1/-1;border-style:dashed;color:var(--accent);display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 12px}.entry-bar{display:grid;grid-template-columns:minmax(90px,1fr) 2fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line);font-size:10px}.entry-track,.flow-track{height:6px;border-radius:99px;background:var(--soft);overflow:hidden}.entry-fill,.flow-fill{height:100%;background:var(--green)}.donut-grid{display:grid;grid-template-columns:112px minmax(0,1fr);gap:14px;align-items:center}.donut{width:106px;height:106px;border-radius:50%;position:relative;margin:auto}.donut:after{content:"";position:absolute;inset:22px;border-radius:50%;background:var(--card)}.donut-center{position:absolute;inset:0;display:grid;place-items:center;z-index:1;font-family:Georgia,"Times New Roman",serif;font-size:22px}.mix-list{display:grid;gap:5px;font-size:9px}.mix-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center}.flow-viz{display:grid;gap:6px}.flow-viz-row{display:grid;grid-template-columns:minmax(100px,1fr) auto minmax(100px,1fr) 2fr auto;gap:7px;align-items:center;font-size:10px}.campaign{grid-column:1/-1}.campaign-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}.funnel-step{border:1px solid var(--line);border-radius:8px;padding:9px;min-height:66px}.funnel-step strong{display:block;font-family:Georgia,"Times New Roman",serif;font-size:21px;margin-top:5px}.campaign-form{display:grid;grid-template-columns:1fr 2fr 1.4fr 1.6fr repeat(4,1fr) auto;gap:6px;margin-top:12px}.campaign-form input,.campaign-form select,.campaign-form button{min-width:0;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.campaign-list{margin-top:9px;display:grid;gap:5px;font-size:10px}.campaign-item{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:6px}.muted{color:var(--muted)}
+details.drawer{grid-column:1/-1;padding:0}details.drawer>summary,details.discovery-shell>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;font-size:10px;letter-spacing:.13em;font-weight:800;color:var(--ink)}details.drawer>summary::-webkit-details-marker,details.discovery-shell>summary::-webkit-details-marker{display:none}details.drawer>summary:after,details.discovery-shell>summary:after{content:"＋";font-size:15px;color:var(--green)}details.drawer[open]>summary:after,details.discovery-shell[open]>summary:after{content:"−"}.drawer-content{padding:0 14px 14px}.drawer-meta{font-size:9px;letter-spacing:0;color:var(--muted);font-weight:600}.detail-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}.detail-grid>.card{box-shadow:none;background:#fff;border-radius:9px}
+.bar-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--line);font-size:10px}
 .bar-wrap{grid-column:1/-1;height:3px;background:#e5ded2;margin-top:-3px}
-.bar{height:100%;background:var(--ink)}
-.discovery{margin-bottom:12px}.discovery .grid{margin-top:0}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.inbox{grid-column:1/-1}.inbox-controls{display:grid;grid-template-columns:180px minmax(0,1fr) auto;gap:8px;align-items:center}.inbox-controls select,.inbox-controls input,.inbox-controls button,.index-select{border:1px solid var(--line);background:transparent;color:var(--ink);padding:8px;font:inherit;font-size:11px}.snapshot-list{display:grid;gap:7px;margin-top:10px}.snapshot-item{display:flex;justify-content:space-between;gap:12px;padding-top:7px;border-top:1px solid #ded7cc;font-size:11px}.drop-note{font-size:10px;color:var(--muted);line-height:1.6;margin-top:8px}.diagnostic{border-left:3px solid var(--accent)}.error{border:1px solid var(--accent);padding:14px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
-footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
-@media(max-width:900px){.kpi,.seo-kpi,.health{grid-column:span 4}.inbox-controls{grid-template-columns:1fr}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1120px);padding-top:20px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half{grid-column:1/-1}.donut-grid{grid-template-columns:1fr}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}}
+.bar{height:100%;background:var(--green)}
+#discovery{margin-top:10px}.discovery{padding:0 14px 14px}.discovery .grid{margin-top:0}.discovery-shell{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}.discovery-status{grid-column:1/-1}.index-table{grid-column:1/-1}.health{grid-column:span 4}.seo-kpi{grid-column:span 2}.seo-kpi .value{font-family:Georgia,"Times New Roman",serif;font-size:24px;margin-top:6px}.inbox{grid-column:1/-1}.inbox-controls{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:7px;align-items:center}.inbox-controls select,.inbox-controls input,.inbox-controls button,.index-select{border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:7px;font:inherit;font-size:10px}.snapshot-list{display:grid;gap:6px;margin-top:8px}.snapshot-item{display:flex;justify-content:space-between;gap:12px;padding-top:6px;border-top:1px solid var(--line);font-size:10px}.drop-note{font-size:9px;color:var(--muted);line-height:1.55;margin-top:7px}.diagnostic{border-left:3px solid var(--accent)}.error{border:1px solid var(--accent);border-radius:10px;padding:12px;color:var(--accent);background:#fff8f5;white-space:pre-wrap}
+.sns-row{padding:12px 0;border-top:1px solid var(--line)}.sns-heading{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:8px}.sns-heading span{font-variant-numeric:tabular-nums}.sns-track{display:flex;height:18px;background:var(--soft);border-radius:4px;overflow:hidden}.sns-track span{height:100%}.sns-breakdown{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;margin-top:7px}.sns-note{font-size:12px;line-height:1.6;color:var(--muted);margin:8px 0}.sns-heading strong{min-width:0}.sns-heading span{flex-shrink:0}@media(max-width:390px){.sns-heading{flex-wrap:wrap}.sns-breakdown{gap:6px 10px}}
+footer{margin-top:16px;color:var(--muted);font-size:9px;line-height:1.6}
+@media(max-width:980px){.kpi,.seo-kpi{grid-column:span 4}.health{grid-column:span 4}.primary-chart,.summary-chart{grid-column:span 6}.inbox-controls{grid-template-columns:1fr}.campaign-form{grid-template-columns:1fr 1fr}.campaign-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){main{width:min(100% - 20px,1240px);padding-top:18px}header{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}.kpi,.seo-kpi,.health{grid-column:span 6}.pages,.channels,.referrers,.half,.chart-half,.primary-chart,.summary-chart{grid-column:1/-1}.donut-grid{grid-template-columns:100px minmax(0,1fr)}.campaign-grid{grid-template-columns:repeat(2,1fr)}.campaign-form{grid-template-columns:1fr}.flow-viz-row{grid-template-columns:1fr auto 1fr}.flow-viz-row .flow-track,.flow-viz-row .flow-count{grid-column:1/-1}.status{flex-direction:column}.detail-grid>.card{grid-column:1/-1}}@media(max-width:390px){main{width:calc(100% - 14px)}.actions{gap:4px}.actions button{padding:6px 8px}.seo-kpi,.health{grid-column:1/-1}details.drawer>summary,details.discovery-shell>summary{align-items:flex-start;flex-direction:column}.drawer-meta{line-height:1.5}}
+.campaign-form{grid-template-columns:repeat(3,minmax(0,1fr))}.campaign-form label{min-width:0;font-size:11px}.campaign-form label input{display:block;width:100%;box-sizing:border-box;margin-top:4px}.campaign-item span{min-width:0;overflow-wrap:anywhere}#campaignCompare{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:12px 0}#campaignCompare select{max-width:100%;padding:6px}#campaignCompare label{min-width:0;max-width:100%}#campaignResult{font-size:12px;line-height:1.5;overflow-wrap:anywhere}#campaignResult th,#campaignResult td{padding:7px 4px;white-space:normal}@media(max-width:760px){.campaign-form{grid-template-columns:minmax(0,1fr)}}
 </style>
 </head>
 <body>
@@ -694,12 +1055,13 @@ footer{margin-top:22px;color:var(--muted);font-size:10px;line-height:1.6}
 <button data-window="24h">24H</button>
 <button data-window="7d" class="active">7D</button>
 <button data-window="30d">30D</button>
+<button class="refresh" id="aiShare">AI COPY</button>
 <button class="refresh" id="refresh">REFRESH</button>
 </div>
 </header>
 <div class="status"><span id="period">Loading…</span><span id="updated"></span></div>
-<div id="discovery"></div>
 <div id="content"></div>
+<div id="discovery"></div>
 <footer>Cloudflare Web Analytics / RUM。Page views と Visits は別定義。ページ表の ENTRY VISITS は、そのページが外部流入・直接流入の入口になった回数。内部遷移は0になり得る。検索露出は Search Console と分離して扱う。</footer>
 </main>
 <script>
@@ -724,10 +1086,10 @@ function rows(items,max=8){
     return '<div class="bar-row"><span>'+esc(x.name)+'</span><strong>'+n(x.pageviews)+'</strong><div class="bar-wrap"><div class="bar" style="width:'+width+'%"></div></div></div>';
   }).join("");
 }
-const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
+const COLORS={pageviews:"#181716",visits:"#8d2c23",X:"#315c3d",YouTube:"#a33b32",Search:"#365f7d",Direct:"#9a7b4f",Meta:"#7b5674",AI:"#6b6b6b",Other:"#aaa197"};
 function bucketTime(value){
   if(!value)return NaN;
-  if(/^\d{4}-\d{2}-\d{2}$/.test(value))return new Date(value+"T00:00:00Z").getTime();
+  if(/^\\d{4}-\\d{2}-\\d{2}$/.test(value))return new Date(value+"T00:00:00Z").getTime();
   return new Date(value).getTime();
 }
 function bucketLabel(value){
@@ -738,9 +1100,10 @@ function bucketLabel(value){
     :{month:"numeric",day:"numeric",timeZone:"Asia/Tokyo"};
   return new Intl.DateTimeFormat("ja-JP",opts).format(new Date(t));
 }
-function lineChart(points,series,campaigns=[]){
+const HOST_MIGRATION = ${JSON.stringify(HOST_MIGRATION)};
+function lineChart(points,series,campaigns=[],hostMigration=false){
   if(!points?.length)return '<div class="muted">時系列データなし</div>';
-  const w=900,h=250,l=42,r=18,t=18,b=34,iw=w-l-r,ih=h-t-b;
+  const w=900,h=220,l=42,r=18,t=16,b=30,iw=w-l-r,ih=h-t-b;
   const start=new Date(window.__vaWindowStart||points[0].bucket).getTime();
   const end=new Date(window.__vaWindowEnd||points[points.length-1].bucket).getTime();
   const values=points.flatMap(p=>series.map(s=>Number(p[s.key]||0)));
@@ -763,26 +1126,33 @@ function lineChart(points,series,campaigns=[]){
   }).join("");
   const tickIdx=[0,Math.floor((points.length-1)/4),Math.floor((points.length-1)/2),Math.floor((points.length-1)*3/4),points.length-1].filter((v,i,a)=>v>=0&&a.indexOf(v)===i);
   const ticks=tickIdx.map(i=>'<text x="'+xFor(points[i].bucket,i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="#706d67">'+esc(bucketLabel(points[i].bucket))+'</text>').join("");
-  const markers=campaigns.map(item=>{
-    if(!item.postedAt)return "";
-    const mt=new Date(item.postedAt).getTime();
+  const events=hostMigration ? [...campaigns,{linkAddedAt:HOST_MIGRATION.markerAt,label:"HOST MIGRATION",migration:true}] : campaigns;
+  const markers=events.map(item=>{
+    if(!item.linkAddedAt)return "";
+    const mt=new Date(item.linkAddedAt).getTime();
     if(!Number.isFinite(mt)||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||mt<start||mt>end)return "";
     const x=l+((mt-start)/(end-start))*iw;
-    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="#8d2c23" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="#8d2c23">'+esc(item.label||"X POST")+'</text>';
+    const platform=item.platform==="YouTube"?"YouTube":"X";
+    const color=item.migration?"#706d67":platform==="YouTube"?COLORS.YouTube:COLORS.X;
+    const prefix=platform==="YouTube"?"YT":"X";
+    return '<line x1="'+x+'" y1="'+t+'" x2="'+x+'" y2="'+(t+ih)+'" stroke="'+color+'" stroke-width="1" stroke-dasharray="4 4"/><text x="'+Math.min(w-r-4,x+4)+'" y="'+(t+11)+'" font-size="9" fill="'+color+'">'+esc(item.migration?item.label:prefix+" · "+(item.label||"POST"))+'</text>';
   }).join("");
   const legend='<div class="chart-legend">'+series.map(s=>'<span><i class="legend-dot" style="background:'+s.color+'"></i>'+esc(s.label)+'</span>').join("")+'</div>';
   return '<div class="chart-wrap"><svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img">'+grid+lines+markers+ticks+'</svg></div>'+legend;
 }
 function entryBars(pages){
-  const items=[...pages].sort((a,b)=>(b.visits-a.visits)||(b.pageviews-a.pageviews)).slice(0,8);
+  const items=[...pages].sort((a,b)=>(b.visits-a.visits)||(b.pageviews-a.pageviews)).slice(0,6);
   const max=Math.max(1,...items.map(x=>x.visits));
   return items.map(x=>'<div class="entry-bar"><span><strong>'+esc(x.name)+'</strong><span class="path">'+esc(x.path)+'</span></span><div class="entry-track"><div class="entry-fill" style="width:'+((x.visits/max)*100)+'%"></div></div><strong>'+n(x.visits)+'</strong></div>').join("");
 }
 function channelColor(name){
   if(name==="X")return COLORS.X;
+  if(name==="YouTube")return COLORS.YouTube;
   if(name==="Organic Search")return COLORS.Search;
   if(name==="Direct / Unknown")return COLORS.Direct;
-  if(name==="Instagram"||name==="Facebook"||name==="Other SNS")return COLORS.Meta;
+  if(name==="Instagram")return "#925579";
+  if(name==="Facebook")return "#426d9b";
+  if(name==="Other SNS")return "#8a763a";
   if(name==="AI Assistant")return COLORS.AI;
   return COLORS.Other;
 }
@@ -800,20 +1170,52 @@ function trafficMix(channels){
   return '<div class="donut-grid"><div class="donut" style="background:conic-gradient('+stops.join(",")+')"><div class="donut-center">'+n(total)+'</div></div><div class="mix-list">'+list+'</div></div>';
 }
 function flowVisual(items){
-  const list=items.slice(0,10);
+  const list=items.slice(0,7);
   const max=Math.max(1,...list.map(x=>x.pageviews));
   if(!list.length)return '<div class="muted">内部遷移データなし</div>';
   return '<div class="flow-viz">'+list.map(x=>'<div class="flow-viz-row"><strong>'+esc(x.sourceName)+'</strong><span>→</span><strong>'+esc(x.destinationName)+'</strong><div class="flow-track"><div class="flow-fill" style="width:'+((x.pageviews/max)*100)+'%"></div></div><span class="flow-count">'+n(x.pageviews)+'</span></div>').join("")+'</div>';
 }
+function snsEntryChart(data){
+  if(!data)return '<div class="muted">SNS入口データを取得できませんでした。</div>';
+  const channels=["X","Instagram","Facebook","Other SNS"];
+  const max=Math.max(1,...data.pages.map(p=>p.total));
+  const note=data.complete?'判別できたSNS入口 '+n(data.total)+'件':'取得上限に到達：表示分 '+n(data.total)+'件（全体比は算出保留）';
+  return '<div class="sns-note">'+note+(data.total<30?' · 少数データ：傾向判断は保留':'')+'<br>棒の共通目盛り：0〜'+n(max)+'件</div>'+
+    data.pages.map(p=>'<div class="sns-row"><div class="sns-heading"><strong>'+esc(p.name)+'</strong><span>'+n(p.total)+'件'+(data.complete&&data.total?' · SNS全体の'+(p.total/data.total*100).toFixed(0)+'%':'')+'</span></div><div class="sns-track" role="img" aria-label="'+esc(p.name+' '+channels.map(c=>c+' '+p.values[c]+'件').join('、'))+'">'+channels.map(c=>'<span style="width:'+(p.values[c]/max*100)+'%;background:'+channelColor(c)+'"></span>').join('')+'</div><div class="sns-breakdown">'+channels.map(c=>'<span><i class="legend-dot" style="background:'+channelColor(c)+'"></i>'+esc(c)+' '+n(p.values[c])+'</span>').join('')+'</div></div>').join('')+
+    '<div class="sns-note">入口回数（人数・SNSクリック数ではありません）。Direct / UnknownにSNS由来が含まれる場合があります。Other pagesは上記3ページ以外。</div>';
+}
 const CAMPAIGN_KEY="vaCampaigns";
+function normalizeCampaignRecord(item){
+  const platform=item?.platform==="YouTube"?"YouTube":"X";
+  return {
+    ...item,
+    platform,
+    label:String(item?.label||(platform==="YouTube"?"YOUTUBE VIDEO":"X POST")),
+    postUrl:String(item?.postUrl||""),
+    postId:String(item?.postId||""),
+    authorName:String(item?.authorName||""),
+    postText:String(item?.postText||""),
+    postedAt:String(item?.postedAt||""),
+    linkAddedAt:item?.linkAddedAt||"",
+    measuredAt:item?.measuredAt||null,
+    targetPath:normalizeTargetPath(item?.targetPath||"/"),
+    impressions:item?.impressions===null||item?.impressions===undefined?null:Number(item.impressions),
+    engagements:item?.engagements===null||item?.engagements===undefined?null:Number(item.engagements),
+    details:item?.details===null||item?.details===undefined?null:Number(item.details),
+    linkClicks:item?.linkClicks===null||item?.linkClicks===undefined?null:Number(item.linkClicks),
+    views:item?.views===null||item?.views===undefined?null:Number(item.views),
+    likes:item?.likes===null||item?.likes===undefined?null:Number(item.likes),
+    avgViewPercentage:item?.avgViewPercentage===null||item?.avgViewPercentage===undefined?null:Number(item.avgViewPercentage)
+  };
+}
 function getCampaigns(){
   try{
     const parsed=JSON.parse(localStorage.getItem(CAMPAIGN_KEY)||"[]");
-    return Array.isArray(parsed)?parsed:[];
+    return Array.isArray(parsed)?parsed.map(normalizeCampaignRecord):[];
   }catch{return[]}
 }
 function saveCampaigns(items){
-  localStorage.setItem(CAMPAIGN_KEY,JSON.stringify(items));
+  localStorage.setItem(CAMPAIGN_KEY,JSON.stringify(items.map(normalizeCampaignRecord)));
 }
 function normalizeTargetPath(value){
   let out=String(value||"/").trim();
@@ -821,84 +1223,146 @@ function normalizeTargetPath(value){
   if(out!=="/"&&!out.endsWith("/"))out+="/";
   return out;
 }
-function campaignPanel(entryFlows,internalFlows){
+function campaignPanel(){
   const campaigns=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")));
   const active=campaigns[0]||null;
   if(!active){
-    return '<div class="muted">投稿を登録すると、折れ線に投稿時刻を重ねてファネル比較できる。</div>'+campaignFormHtml();
+    return '<div class="muted">X / YouTubeのリンク追加日時を登録すると、施策開始を折れ線に重ね、1・24・72時間の前後比較ができます。各プラットフォーム数値は手入力・空欄は未取得です。</div>'+campaignFormHtml();
   }
-  const xEntries=entryFlows.filter(x=>x.channel==="X").reduce((s,x)=>s+x.visits,0);
-  const targetEntries=entryFlows.filter(x=>x.channel==="X"&&x.destinationPath===active.targetPath).reduce((s,x)=>s+x.visits,0);
-  const nextPages=internalFlows.filter(x=>x.sourceCleanPath===active.targetPath).reduce((s,x)=>s+x.pageviews,0);
-  const steps=[
-    ["IMPRESSIONS",active.impressions],
-    ["LINK CLICKS",active.linkClicks],
-    ["X ENTRIES*",xEntries],
-    ["TARGET ENTRIES*",targetEntries],
-    ["NEXT PAGE*",nextPages]
-  ];
-  const funnel='<div class="campaign-grid">'+steps.map(([label,val])=>'<div class="funnel-step"><span class="section-title">'+label+'</span><strong>'+esc(val)+'</strong></div>').join("")+'</div>'+
-    '<div class="path">* Cloudflare側は選択期間の比較値。投稿単位の完全な帰属ではない。</div>';
-  const list='<div class="campaign-list">'+campaigns.slice(0,5).map((x,i)=>'<div class="campaign-item"><span><strong>'+esc(x.label)+'</strong> · '+esc(x.postedAt||"時刻未登録")+' · '+esc(x.targetPath||"/")+(x.authorName?' · '+esc(x.authorName):'')+(x.postUrl?'<span class="path">'+esc(x.postUrl)+'</span>':'')+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
-  return funnel+campaignFormHtml()+list;
+  const funnel='<div class="muted">プラットフォーム側の数値は手入力の累積値です。未入力は未取得。旧X記録はplatform未指定でもXとして読み込みます。前後比較は投稿別の完全帰属・満足度を示すものではありません。</div>';
+  const list='<div class="campaign-list">'+campaigns.map((x,i)=>'<div class="campaign-item"><span><strong>['+esc(x.platform)+'] '+esc(x.label)+'</strong> · 開始 '+esc(x.linkAddedAt?new Date(x.linkAddedAt).toLocaleString():"未登録")+' · '+esc(x.targetPath||"/")+(x.authorName?' · '+esc(x.authorName):'')+(x.postUrl?'<span class="path">'+esc(x.postUrl)+'</span>':'')+'</span><button type="button" data-campaign-delete="'+i+'">削除</button></div>').join("")+'</div>';
+  const compare='<form id="campaignCompare"><label>比較する施策 <select name="campaign">'+campaigns.map((x,i)=>'<option value="'+i+'">['+esc(x.platform)+'] '+esc(x.label)+'</option>').join('')+'</select></label> <label>期間 <select name="hours"><option value="1">1時間</option><option value="24" selected>24時間</option><option value="72">72時間</option></select></label> <button>前後比較を取得</button></form><div id="campaignResult" aria-live="polite">施策を選んで取得してください。上部の期間選択とは独立しています。</div>';
+  return funnel+compare+campaignFormHtml()+list;
 }
 function campaignFormHtml(){
   return '<form class="campaign-form" id="campaignForm">'+
-    '<input name="postUrl" type="url" placeholder="X post URL（貼ると自動読込）">'+
+    '<select name="platform" aria-label="プラットフォーム"><option value="X">X</option><option value="YouTube">YouTube</option></select>'+
+    '<input name="postUrl" type="url" aria-label="投稿URL" placeholder="X URL（本文のみ自動取得）">'+
     '<input name="label" placeholder="投稿名" required>'+
-    '<input name="postedAt" type="datetime-local" required>'+
-    '<input name="targetPath" placeholder="/cyma-time-o-vox/" required>'+
-    '<input name="impressions" type="number" min="0" placeholder="imp">'+
-    '<input name="engagements" type="number" min="0" placeholder="eng">'+
-    '<input name="details" type="number" min="0" placeholder="detail">'+
-    '<input name="linkClicks" type="number" min="0" placeholder="click">'+
+    '<label>投稿日時（任意・端末の時刻）<input name="postedAt" type="datetime-local"></label>'+
+    '<label>リンク追加・施策開始（端末の時刻）<input name="linkAddedAt" type="datetime-local" required></label>'+
+    '<label>数値を確認した日時（入力時は必須）<input name="measuredAt" type="datetime-local"></label>'+
+    '<input name="targetPath" placeholder="/basis-alarm/" required>'+
+    '<input name="impressions" aria-label="指標1" type="number" min="0" step="0.1" placeholder="表示回数（未取得は空欄）">'+
+    '<input name="engagements" aria-label="指標2" type="number" min="0" step="0.1" placeholder="反応数（任意）">'+
+    '<input name="details" aria-label="指標3" type="number" min="0" step="0.1" placeholder="詳細クリック数（任意）">'+
+    '<input name="linkClicks" aria-label="リンククリック数" type="number" min="0" step="0.1" placeholder="リンククリック数（任意）">'+
     '<button type="submit">ADD</button></form>';
 }
+function applyCampaignPlatform(form){
+  const platform=form.elements.platform?.value==="YouTube"?"YouTube":"X";
+  const url=form.elements.postUrl;
+  const metric1=form.elements.impressions;
+  const metric2=form.elements.engagements;
+  const metric3=form.elements.details;
+  const link=form.elements.linkClicks;
+  if(platform==="YouTube"){
+    if(url)url.placeholder="YouTube / Shorts URL（タイトル自動取得）";
+    if(metric1){metric1.placeholder="再生回数（未取得は空欄）";metric1.setAttribute("aria-label","再生回数");}
+    if(metric2){metric2.placeholder="高評価数（任意）";metric2.setAttribute("aria-label","高評価数");}
+    if(metric3){metric3.placeholder="平均視聴率 %（任意）";metric3.setAttribute("aria-label","平均視聴率");}
+    if(link)link.placeholder="リンククリック数（分かる場合のみ）";
+  }else{
+    if(url)url.placeholder="X URL（本文のみ自動取得）";
+    if(metric1){metric1.placeholder="表示回数（未取得は空欄）";metric1.setAttribute("aria-label","表示回数");}
+    if(metric2){metric2.placeholder="反応数（任意）";metric2.setAttribute("aria-label","反応数");}
+    if(metric3){metric3.placeholder="詳細クリック数（任意）";metric3.setAttribute("aria-label","詳細クリック数");}
+    if(link)link.placeholder="リンククリック数（任意）";
+  }
+}
 function bindCampaignUi(){
+  const compare=document.getElementById("campaignCompare");
+  if(compare)compare.addEventListener("submit",async event=>{
+    event.preventDefault();
+    const out=document.getElementById("campaignResult");
+    const active=getCampaigns().sort((a,b)=>String(b.postedAt||"").localeCompare(String(a.postedAt||"")))[Number(compare.elements.campaign.value)];
+    if(!active?.linkAddedAt){out.textContent="旧記録にはリンク追加日時がありません。投稿日時から推定せず、新しく施策を登録してください。";return;}
+    compare.querySelector('button').disabled=true;
+    out.textContent="比較データを取得中…";
+    try{
+      const res=await fetch('/api/campaign?start='+encodeURIComponent(active.linkAddedAt)+'&hours='+compare.elements.hours.value+'&target='+encodeURIComponent(active.targetPath)+'&platform='+encodeURIComponent(active.platform),{cache:"no-store"});
+      const data=await res.json();if(!res.ok||data.error)throw new Error(data.error||("HTTP "+res.status));
+      const fmt=value=>new Date(value).toLocaleString();
+      const metric=value=>value===null||value===undefined?'未取得':esc(value);
+      const platform=active.platform==="YouTube"?"YouTube":"X";
+      const rows=[[platform+'からの入口回数','platformEntries'],[platform+' → 対象ページの入口回数','targetEntries'],['対象 → 別ページのPV','nextPages']];
+      const manual=platform==="YouTube"
+        ?'YouTube手入力累積：再生 '+metric(active.views)+' ／ 高評価 '+metric(active.likes)+' ／ 平均視聴率 '+(active.avgViewPercentage===null||active.avgViewPercentage===undefined?'未取得':esc(active.avgViewPercentage)+'%')+' ／ リンククリック '+metric(active.linkClicks)
+        :'X手入力累積：表示 '+metric(active.impressions)+' ／ リンククリック '+metric(active.linkClicks);
+      out.innerHTML='<p>['+esc(platform)+'] '+esc(active.label)+' · '+(data.complete?'期間完了':'途中経過：経過時間に合わせて比較')+'（各 '+data.elapsedHours.toFixed(2)+' 時間）</p><p>前：'+esc(fmt(data.beforeStart))+' → '+esc(fmt(data.start))+'<br>後：'+esc(fmt(data.start))+' → '+esc(fmt(data.end))+'</p><table><thead><tr><th>指標</th><th>前</th><th>後</th><th>差</th></tr></thead><tbody>'+rows.map(([label,key])=>'<tr><td>'+label+'</td><td>'+data.before[key]+'</td><td>'+data.after[key]+'</td><td>'+(data.after[key]-data.before[key])+'</td></tr>').join('')+'</tbody></table><p>'+manual+'<br>確認日時：'+(active.measuredAt?esc(fmt(active.measuredAt)):'未登録')+'</p><p>入口回数は人数・クリック数ではありません。別ページPVは全流入元を含み、同一ページ遷移を除外。プラットフォーム側の累積値は前後比較に使っていません。YouTubeアプリ等でRefererが落ちる場合はDirect / Unknownになり得ます。'+(data.before.possiblyTruncated||data.after.possiblyTruncated?'取得上限に到達：部分集計の可能性があります。':'')+'</p>';
+    }catch(error){out.textContent='取得失敗：'+error.message;}finally{compare.querySelector('button').disabled=false;}
+  });
   const form=document.getElementById("campaignForm");
   if(form){
+    const platform=form.elements.platform;
     const postUrl=form.elements.postUrl;
+    applyCampaignPlatform(form);
+    if(platform)platform.addEventListener("change",()=>{
+      if(postUrl){
+        postUrl.value="";
+        postUrl.dataset.postId="";
+        postUrl.dataset.authorName="";
+        postUrl.dataset.postText="";
+        postUrl.dataset.state="";
+      }
+      applyCampaignPlatform(form);
+    });
     if(postUrl)postUrl.addEventListener("change",async()=>{
       const value=String(postUrl.value||"").trim();
       if(!value)return;
+      const currentPlatform=form.elements.platform?.value==="YouTube"?"YouTube":"X";
       postUrl.dataset.state="loading";
       try{
-        const res=await fetch('/api/x-preview?url='+encodeURIComponent(value),{cache:"no-store"});
+        const endpoint=currentPlatform==="YouTube"?"/api/youtube-preview":"/api/x-preview";
+        const res=await fetch(endpoint+'?url='+encodeURIComponent(value),{cache:"no-store"});
         const preview=await res.json();
         if(!res.ok||preview.error)throw new Error(preview.error||("HTTP "+res.status));
         postUrl.value=preview.url||value;
-        postUrl.dataset.postId=preview.postId||"";
+        postUrl.dataset.postId=preview.postId||preview.videoId||"";
         postUrl.dataset.authorName=preview.authorName||"";
-        postUrl.dataset.postText=preview.text||"";
+        postUrl.dataset.postText=preview.text||preview.title||"";
         if(!form.elements.label.value){
-          const base=(preview.text||"").replace(/\s+/g," ").trim();
-          form.elements.label.value=base?base.slice(0,42):(preview.authorName||"X POST");
+          const base=(preview.title||preview.text||"").replace(/\\s+/g," ").trim();
+          form.elements.label.value=base?base.slice(0,60):(preview.authorName||(currentPlatform==="YouTube"?"YOUTUBE VIDEO":"X POST"));
         }
         postUrl.dataset.state="ready";
       }catch(err){
         postUrl.dataset.state="error";
-        alert("X投稿の読込に失敗: "+err.message);
+        alert((currentPlatform==="YouTube"?"YouTube動画":"X投稿")+"の読込に失敗: "+err.message);
       }
     });
     form.addEventListener("submit",event=>{
-    event.preventDefault();
-    const fd=new FormData(form);
-    const items=getCampaigns();
-    items.push({
-      label:String(fd.get("label")||"X POST"),
-      postUrl:String(fd.get("postUrl")||""),
-      postId:String(form.elements.postUrl?.dataset.postId||""),
-      authorName:String(form.elements.postUrl?.dataset.authorName||""),
-      postText:String(form.elements.postUrl?.dataset.postText||""),
-      postedAt:String(fd.get("postedAt")||""),
-      targetPath:normalizeTargetPath(fd.get("targetPath")),
-      impressions:Number(fd.get("impressions")||0),
-      engagements:Number(fd.get("engagements")||0),
-      details:Number(fd.get("details")||0),
-      linkClicks:Number(fd.get("linkClicks")||0)
-    });
-    saveCampaigns(items);
-    render(window.__vaLastData);
+      event.preventDefault();
+      const fd=new FormData(form);
+      const numeric=name=>String(fd.get(name)||'').trim()===''?null:Number(fd.get(name));
+      const currentPlatform=String(fd.get("platform")||"X")==="YouTube"?"YouTube":"X";
+      if(['impressions','engagements','details','linkClicks'].some(name=>numeric(name)!==null)&&!fd.get('measuredAt')){alert(currentPlatform+'数値を確認した日時を入力してください。');return;}
+      if(new Date(String(fd.get('linkAddedAt'))).getTime()>Date.now()){alert('施策開始日時は過去の日時を入力してください。');return;}
+      const items=getCampaigns();
+      const metric1=numeric("impressions"),metric2=numeric("engagements"),metric3=numeric("details");
+      items.push({
+        platform:currentPlatform,
+        label:String(fd.get("label")||(currentPlatform==="YouTube"?"YOUTUBE VIDEO":"X POST")),
+        postUrl:String(fd.get("postUrl")||""),
+        postId:String(form.elements.postUrl?.dataset.postId||""),
+        authorName:String(form.elements.postUrl?.dataset.authorName||""),
+        postText:String(form.elements.postUrl?.dataset.postText||""),
+        postedAt:String(fd.get("postedAt")||""),
+        linkAddedAt:new Date(String(fd.get("linkAddedAt"))).toISOString(),
+        measuredAt:fd.get("measuredAt")?new Date(String(fd.get("measuredAt"))).toISOString():null,
+        schemaVersion:3,
+        targetPath:normalizeTargetPath(fd.get("targetPath")),
+        impressions:currentPlatform==="X"?metric1:null,
+        engagements:currentPlatform==="X"?metric2:null,
+        details:currentPlatform==="X"?metric3:null,
+        views:currentPlatform==="YouTube"?metric1:null,
+        likes:currentPlatform==="YouTube"?metric2:null,
+        avgViewPercentage:currentPlatform==="YouTube"?metric3:null,
+        linkClicks:numeric("linkClicks")
+      });
+      saveCampaigns(items);
+      render(window.__vaLastData);
+      document.querySelector('details.campaign').open=true;
     });
   }
   document.querySelectorAll("[data-campaign-delete]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -920,11 +1384,11 @@ function render(data){
   const searchNow=c.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const searchPrev=p.channels.find(x=>x.name==="Organic Search")?.visits||0;
   const entryFlows=c.flows.filter(x=>x.visits>0 && x.channel!=="Internal Navigation");
-  const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation");
+  const internalFlows=c.flows.filter(x=>x.channel==="Internal Navigation"&&x.sourceCleanPath!==x.destinationPath);
   const campaigns=getCampaigns();
-  const trend=(data.trend||[]).map(x=>({...x,meta:(x.instagram||0)+(x.facebook||0)+(x.otherSns||0)}));
+  const trend=data.trend||[];
   const pagesPerVisit=c.visits?c.pageviews/c.visits:0;
-  const watchEntry=c.pages.filter(x=>x.name==="Pierce Duofon"||x.name==="Cyma Time-O-Vox").reduce((s,x)=>s+x.visits,0);
+  const watchEntry=c.pages.filter(x=>["Basis Alarm","Pierce Duofon","Cyma Time-O-Vox"].includes(x.name)).reduce((s,x)=>s+x.visits,0);
   const watchShare=c.visits?(watchEntry/c.visits)*100:0;
   const unmapped=c.pages.filter(x=>!x.mapped);
   const audit=unmapped.length
@@ -941,25 +1405,28 @@ function render(data){
   ).join("");
   const lowSample=c.visits<30?'<section class="card low-sample"><strong>LOW SAMPLE</strong><span>'+n(c.visits)+' visits · まだ傾向断定は保留</span></section>':'';
   const trafficSeries=[{key:"pageviews",label:"Page views",color:COLORS.pageviews},{key:"visits",label:"Visits",color:COLORS.visits}];
-  const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"meta",label:"Meta",color:COLORS.Meta}];
+  const acquisitionSeries=[{key:"x",label:"X",color:COLORS.X},{key:"youtube",label:"YouTube",color:COLORS.YouTube},{key:"search",label:"Search",color:COLORS.Search},{key:"direct",label:"Direct",color:COLORS.Direct},{key:"instagram",label:"Instagram",color:channelColor("Instagram")},{key:"facebook",label:"Facebook",color:channelColor("Facebook")},{key:"otherSns",label:"Other SNS",color:channelColor("Other SNS")}];
   document.getElementById("content").innerHTML=
-  '<div class="grid">'+audit+lowSample+
+  '<div class="path">'+esc(HOST_MIGRATION.note)+' 集計ホスト: '+esc(data.host)+'</div>'+
+  '<div class="grid analytics-grid">'+audit+lowSample+
     '<section class="card kpi"><div class="label">VISITS</div><div class="value">'+n(c.visits)+'</div>'+delta(c.visits,p.visits)+'</section>'+
     '<section class="card kpi"><div class="label">PAGE VIEWS</div><div class="value">'+n(c.pageviews)+'</div>'+delta(c.pageviews,p.pageviews)+'</section>'+
     '<section class="card kpi"><div class="label">X VISITS</div><div class="value">'+n(xNow)+'</div>'+delta(xNow,xPrev)+'</section>'+
     '<section class="card kpi"><div class="label">ORGANIC SEARCH</div><div class="value">'+n(searchNow)+'</div>'+delta(searchNow,searchPrev)+'</section>'+
     '<section class="card kpi"><div class="label">PAGES / VISIT</div><div class="value">'+pagesPerVisit.toFixed(2)+'</div><div class="delta">回遊の粗い指標</div></section>'+
-    '<section class="card kpi"><div class="label">WATCH ENTRY SHARE</div><div class="value">'+watchShare.toFixed(0)+'%</div><div class="delta">'+n(watchEntry)+' watch entries</div></section>'+
-    '<section class="card chart-card"><div class="section-head"><div class="section-title">TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
-    '<section class="card chart-card"><div class="section-head"><div class="section-title">ACQUISITION TREND</div><span>X / Search / Direct / Meta</span></div>'+lineChart(trend,acquisitionSeries,campaigns)+'</section>'+
-    '<section class="card chart-half"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
-    '<section class="card chart-half"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
+    '<section class="card kpi"><div class="label">WATCH ENTRY SHARE</div><div class="value">'+watchShare.toFixed(0)+'%</div><div class="delta">全流入 '+n(c.visits)+'件中 '+n(watchEntry)+'件</div></section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">TRAFFIC TREND</div><span>'+esc(data.trendBucket||"no bucket")+'</span></div>'+lineChart(trend,trafficSeries,campaigns,true)+(data.trendWarning?'<div class="path">'+esc(data.trendWarning)+'</div>':'')+'</section>'+
+    '<section class="card summary-chart"><div class="section-head"><div class="section-title">TRAFFIC MIX</div><span>Visits構成</span></div>'+trafficMix(c.channels)+'</section>'+
+    '<section class="card primary-chart"><div class="section-head"><div class="section-title">ACQUISITION TREND</div><span>流入元別の入口回数</span></div>'+lineChart(trend,acquisitionSeries,campaigns,true)+'</section>'+
+    '<section class="card summary-chart"><div class="section-head"><div class="section-title">ENTRY PAGES</div><span>入口回数</span></div>'+entryBars(c.pages)+'</section>'+
+    '<section class="card flow"><div class="section-head"><div class="section-title">SNS → WATCH ENTRY</div><span>判別できたSNS流入の着地先</span></div>'+snsEntryChart(c.snsEntries)+'</section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div>'+flowVisual(internalFlows)+'</section>'+
-    '<section class="card campaign"><div class="section-head"><div class="section-title">CAMPAIGN FUNNEL</div><span>投稿ログはこのブラウザだけに保存</span></div>'+campaignPanel(entryFlows,internalFlows)+'</section>'+
+    '<details class="card drawer campaign"><summary><span>CAMPAIGN FUNNEL</span><span class="drawer-meta">投稿ログはこのブラウザだけに保存</span></summary><div class="drawer-content">'+campaignPanel(entryFlows,internalFlows)+'</div></details>'+
     '<section class="card pages"><div class="section-head"><div class="section-title">PAGES</div><span>'+n(c.pages.length)+' paths</span></div><table><thead><tr><th>PAGE</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
       c.pages.slice(0,20).map(x=>'<tr><td><strong>'+esc(x.name)+'</strong>'+(!x.mapped?'<span class="flag">UNMAPPED</span>':'')+'<span class="path">'+esc(x.path)+'</span></td><td class="num">'+n(x.pageviews)+'</td><td class="num">'+n(x.visits)+'</td></tr>').join("")+
     '</tbody></table></section>'+
     '<section class="card channels"><div class="section-head"><div class="section-title">CHANNELS / PV</div></div>'+rows(c.channels,10)+'</section>'+
+    '<details class="card drawer raw"><summary><span>RAW / AUDIT TABLES</span><span class="drawer-meta">流入元・内部遷移・国・端末の詳細</span></summary><div class="drawer-content detail-grid">'+
     '<section class="card flow"><div class="section-head"><div class="section-title">ENTRY SOURCE → PAGE</div><span>同一行で取得</span></div><table><thead><tr><th>SOURCE</th><th></th><th>DESTINATION</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+flowRows(entryFlows)+'</tbody></table></section>'+
     '<section class="card flow"><div class="section-head"><div class="section-title">SITE FLOW</div><span>内部遷移</span></div><table><thead><tr><th>FROM</th><th></th><th>TO</th><th class="num">PV</th><th class="num">VISITS</th></tr></thead><tbody>'+flowRows(internalFlows,true)+'</tbody></table></section>'+
     '<section class="card referrers"><div class="section-head"><div class="section-title">REFERRERS</div><span>raw host</span></div><table><thead><tr><th>HOST</th><th class="num">PV</th><th class="num">ENTRY VISITS</th></tr></thead><tbody>'+
@@ -967,6 +1434,7 @@ function render(data){
     '</tbody></table></section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">COUNTRIES</div></div>'+rows(c.countries,10)+'</section>'+
     '<section class="card half"><div class="section-head"><div class="section-title">DEVICES</div></div>'+rows(c.devices,10)+'</section>'+
+    '</div></details>'+
   '</div>';
   bindCampaignUi();
 }
@@ -1000,7 +1468,7 @@ function saveIndexStatus(value){
   localStorage.setItem(INDEX_KEY,JSON.stringify(value));
 }
 function normHeader(value){
-  return String(value||"").trim().toLowerCase().replace(/[\s_\-（）()％%]/g,"");
+  return String(value||"").trim().toLowerCase().replace(/[\\s_\\-（）()％%]/g,"");
 }
 function detectMetric(header){
   const h=normHeader(header);
@@ -1028,7 +1496,7 @@ function parseNumber(value){
 }
 function parseCsv(text){
   const rows=[]; let row=[]; let cell=""; let quoted=false;
-  const src=String(text||"").replace(/^\uFEFF/,"");
+  const src=String(text||"").replace(/^\\uFEFF/,"");
   for(let i=0;i<src.length;i++){
     const ch=src[i];
     if(quoted){
@@ -1038,8 +1506,8 @@ function parseCsv(text){
     }else{
       if(ch==='"')quoted=true;
       else if(ch===","){row.push(cell);cell="";}
-      else if(ch==="\n"){row.push(cell);rows.push(row);row=[];cell="";}
-      else if(ch!=="\r")cell+=ch;
+      else if(ch==="\\n"){row.push(cell);rows.push(row);row=[];cell="";}
+      else if(ch!=="\\r")cell+=ch;
     }
   }
   if(cell.length||row.length){row.push(cell);rows.push(row);}
@@ -1117,6 +1585,7 @@ function discoveryTopRows(snapshot){
 }
 function renderDiscoveryInbox(){
   const mount=document.getElementById("discovery");
+  const wasOpen=Boolean(mount.querySelector("details.discovery-shell")?.open);
   const seo=latestSnapshots("seo");
   const geo=latestSnapshots("geo");
   const latestSeo=seo[0]||null,prevSeo=seo[1]||null,latestGeo=geo[0]||null,prevGeo=geo[1]||null;
@@ -1132,7 +1601,7 @@ function renderDiscoveryInbox(){
   const history=[...getDiscoverySnapshots()].sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt))).slice(0,6);
   const historyHtml=history.map(x=>'<div class="snapshot-item"><span><strong>'+(x.kind==="seo"?"SEO":"GOOGLE AI")+'</strong> · '+new Date(x.importedAt).toLocaleString("ja-JP")+' · '+x.files.length+' files</span><span>IMP '+n(x.summary.impressions)+(x.kind==="seo"?' / CLICK '+n(x.summary.clicks):'')+'</span></div>').join("");
   mount.innerHTML=
-    '<div class="discovery"><div class="grid">'+
+    '<details class="discovery-shell" '+(wasOpen?'open':'')+'><summary><span>DISCOVERY / SEO &amp; GEO TOOLS</span><span class="drawer-meta">INDEX '+indexedCount+'/'+KEY_PAGES.length+' · '+esc(diagnosis.label)+'</span></summary><div class="discovery"><div class="grid">'+
       '<section class="card inbox"><div class="section-head"><div class="section-title">DISCOVERY INBOX / ZERO-COST</div><span>Search Console CSVをローカル保存</span></div>'+
         '<div class="inbox-controls"><select id="discoveryKind"><option value="seo">通常SEO</option><option value="geo">Google生成AI</option></select><input id="discoveryFiles" type="file" accept=".csv,text/csv" multiple><button id="importDiscovery" type="button">IMPORT</button></div>'+
         '<div class="drop-note">Search Consoleで「エクスポート → CSV」。CSVが複数ならまとめて選択。API・Google Cloud・課金経路は使わない。データはこのブラウザのlocalStorageだけに保存。</div>'+
@@ -1150,7 +1619,7 @@ function renderDiscoveryInbox(){
       discoveryTopRows(latestGeo)+
       '<section class="card index-table"><div class="section-head"><div class="section-title">INDEX STATUS / MANUAL</div><span>Search Console URL検査の結果だけ記録</span></div><table><thead><tr><th>PAGE</th><th>STATUS</th><th>CHECKED</th></tr></thead><tbody>'+indexRows+'</tbody></table></section>'+
       '<section class="card inbox"><div class="section-head"><div class="section-title">IMPORT HISTORY</div><button id="clearDiscovery" type="button">CLEAR</button></div><div class="snapshot-list">'+(historyHtml||'<div class="muted">まだImportなし。</div>')+'</div></section>'+
-    '</div></div>';
+    '</div></div></details>';
   bindDiscoveryInbox();
 }
 function bindDiscoveryInbox(){
@@ -1201,6 +1670,35 @@ document.querySelectorAll("[data-window]").forEach(btn=>btn.addEventListener("cl
   document.querySelectorAll("[data-window]").forEach(x=>x.classList.toggle("active",x===btn));
   load();
 }));
+document.getElementById("aiShare").addEventListener("click",async()=>{
+  const button=document.getElementById("aiShare");
+  const original=button.textContent;
+  button.disabled=true;
+  button.textContent="WAIT";
+  try{
+    const linkResponse=await fetch("/api/ai-share-link?window="+encodeURIComponent(windowKey)+"&ttl=604800",{cache:"no-store"});
+    const linkData=await linkResponse.json();
+    if(!linkResponse.ok||linkData.error)throw new Error(linkData.error||("HTTP "+linkResponse.status));
+
+    const exportResponse=await fetch(linkData.url,{cache:"no-store"});
+    const exportData=await exportResponse.json();
+    if(!exportResponse.ok||exportData.error)throw new Error(exportData.error||("HTTP "+exportResponse.status));
+
+    const payload=JSON.stringify(exportData);
+    try{
+      await navigator.clipboard.writeText(payload);
+      button.textContent="COPIED";
+    }catch{
+      window.prompt("Copy analytics JSON",payload);
+      button.textContent="READY";
+    }
+    setTimeout(()=>{button.textContent=original;button.disabled=false;},1800);
+  }catch(error){
+    button.textContent="ERROR";
+    alert("AI COPY: "+error.message);
+    setTimeout(()=>{button.textContent=original;button.disabled=false;},1800);
+  }
+});
 document.getElementById("refresh").addEventListener("click",()=>{load();renderDiscoveryInbox();});
 renderDiscoveryInbox();
 load();
