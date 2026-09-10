@@ -123,6 +123,9 @@ assert.equal(analyticsPayload.host, "vintagealarm.github.io");
 assert.equal(analyticsPayload.current.visits, 5);
 assert.equal(analyticsPayload.legacy.host, "orima1995-create.github.io");
 assert.equal(analyticsPayload.legacy.current.visits, 9);
+assert.equal(analyticsPayload.combined.current.visits, 14);
+assert.equal(analyticsPayload.combined.current.pageviews, 14);
+assert.equal(analyticsPayload.combined.trend[0].visits, 14);
 assert.equal(queriedHosts.filter(host => host === "vintagealarm.github.io").length, 3);
 assert.equal(queriedHosts.filter(host => host === "orima1995-create.github.io").length, 3);
 
@@ -172,13 +175,20 @@ const points = [{ bucket: '2026-09-03T00:00:00Z', visits: 1 }, { bucket: '2026-0
 const series = [{ key: 'visits', label: 'Visits', color: '#111' }];
 const campaigns = [{ linkAddedAt: '2026-09-09T16:00:00Z', platform: 'YouTube', label: 'VIDEO' }, { linkAddedAt: '2026-09-09T17:00:00Z', platform: 'X', label: 'POST' }];
 const marked = chart(points, series, campaigns, true);
-assert.ok(marked.includes('HOST MIGRATION'));
-assert.ok(marked.includes('YT · VIDEO'));
-assert.ok(marked.includes('X · POST'));
-const markerLabels = [...marked.matchAll(/<text data-event-marker="label"[^>]*y="([^"]+)"[^>]*text-anchor="([^"]+)"/g)];
-assert.equal(markerLabels.length, 3);
-assert.equal(new Set(markerLabels.map(match => match[1])).size, 3);
-assert.ok(markerLabels.every(match => match[2] === "end"));
+assert.ok(!marked.includes('HOST MIGRATION'));
+assert.ok(!marked.includes('VIDEO'));
+assert.ok(!marked.includes('POST'));
+const markerNumbers = [...marked.matchAll(/<text data-event-marker="number"[^>]*>(\d+)<\/text>/g)].map(match => Number(match[1]));
+assert.deepEqual(markerNumbers, [1, 2, 3]);
+const badgeXs = [...marked.matchAll(/<circle data-event-marker="badge" cx="([^"]+)"/g)].map(match => Number(match[1]));
+assert.equal(badgeXs.length, 3);
+assert.ok(badgeXs.every((x, index) => !index || x - badgeXs[index - 1] >= 20));
+const indexHtml = vm.runInContext('eventIndex', chartContext)(campaigns);
+assert.ok(indexHtml.includes('HOST MIGRATION'));
+assert.ok(indexHtml.includes('YOUTUBE'));
+assert.ok(indexHtml.includes('VIDEO'));
+assert.ok(indexHtml.includes('X'));
+assert.ok(indexHtml.includes('POST'));
 assert.equal(campaigns.length, 2); // Fixed events must never enter saved campaign records.
 assert.ok(!chart(points, series, campaigns).includes('HOST MIGRATION')); // Discovery charts are separate.
 chartContext.window.__vaWindowStart = '2026-09-11T00:00:00Z';
@@ -217,10 +227,13 @@ const requiredLayoutFragments = [
   'option value="YouTube"',
   '"/api/youtube-preview"',
   'key:"youtube",label:"YouTube"',
-  'HOST SCOPE · SEPARATE MEASUREMENT',
+  'TOTAL + HOST BREAKDOWN',
   'HOST TRANSITION · VISITS',
   'LEGACY HOST DETAILS',
   'function hostTrendPoints(',
+  'function eventIndex(',
+  'TOTAL VISITS',
+  'YOUTUBE VISITS',
 ];
 
 for (const fragment of requiredLayoutFragments) {
