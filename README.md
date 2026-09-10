@@ -139,6 +139,7 @@ Worker内のPAGE_NAMESで管理する。
 - YouTube Views / Likes / 平均視聴率とCloudflare YouTube Visitsも同一指標ではない。
 - YouTubeアプリやWebViewでRefererが失われるアクセスはDirect / Unknownになり得る。
 - Page viewsとVisitsは別定義。
+- Cloudflare GraphQLのAdaptive datasetは長期間・複雑なqueryほどsampling解像度が変わり得るため、30D集計は最大7日単位に分割してWorker側で合算する。
 - Search Consoleの表示回数 / Click / CTR / QueryとCloudflare訪問データを混同しない。
 - Campaign Funnel内のCloudflare側数値は選択期間の比較値であり、投稿単位の完全帰属ではない。
 - LOW SAMPLE中は数件差を傾向として断定しない。
