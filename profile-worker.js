@@ -5,7 +5,7 @@ export const X_PROFILE_TRACKING = Object.freeze({
   name: "X Profile",
   url: "https://vintagealarm.github.io/x/",
   eventLabel: "Xプロフィール専用URL発行",
-  eventAt: "2026-09-11T13:59:00.000Z",
+  eventAt: "2026-09-11T14:18:50.000Z",
 });
 
 function patchPage(row) {
