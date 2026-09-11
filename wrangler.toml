@@ -1,5 +1,5 @@
 name = "vintage-alarm-analytics"
-main = "worker.js"
+main = "profile-worker.js"
 compatibility_date = "2026-09-08"
 workers_dev = true
 
