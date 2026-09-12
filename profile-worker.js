@@ -8,6 +8,13 @@ export const X_PROFILE_TRACKING = Object.freeze({
   eventAt: "2026-09-11T14:18:50.000Z",
 });
 
+const TREND_BUCKET_MS = Object.freeze({
+  datetimeFiveMinutes: 5 * 60 * 1000,
+  datetimeFifteenMinutes: 15 * 60 * 1000,
+  datetimeHour: 60 * 60 * 1000,
+  date: 24 * 60 * 60 * 1000,
+});
+
 function patchPage(row) {
   if (!row || row.path !== X_PROFILE_TRACKING.path) return row;
   return { ...row, name: X_PROFILE_TRACKING.name, mapped: true };
@@ -33,6 +40,65 @@ function countProfileEntries(period) {
   return (period?.pages || [])
     .filter((row) => row?.path === X_PROFILE_TRACKING.path)
     .reduce((sum, row) => sum + Number(row?.visits || 0), 0);
+}
+
+function bucketStartMs(value) {
+  if (!value) return NaN;
+  const parsed = Date.parse(String(value));
+  if (Number.isFinite(parsed)) return parsed;
+  const dateOnly = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(dateOnly) ? dateOnly : NaN;
+}
+
+export function buildFreshness(payload) {
+  const queryAt = payload?.generatedAt || null;
+  const queryAtMs = bucketStartMs(queryAt);
+  const trend = Array.isArray(payload?.combined?.trend)
+    ? payload.combined.trend
+    : Array.isArray(payload?.trend)
+      ? payload.trend
+      : [];
+  const bucketKind = payload?.combined?.trendBucket || payload?.trendBucket || null;
+  const bucketWidthMs = TREND_BUCKET_MS[bucketKind] || 0;
+
+  let latest = null;
+  let latestMs = -Infinity;
+  for (const row of trend) {
+    if (Number(row?.pageviews || 0) <= 0 && Number(row?.visits || 0) <= 0) continue;
+    const startMs = bucketStartMs(row?.bucket);
+    if (!Number.isFinite(startMs) || startMs <= latestMs) continue;
+    latest = row;
+    latestMs = startMs;
+  }
+
+  if (!latest || !Number.isFinite(latestMs)) {
+    return {
+      queryOk: true,
+      queryAt,
+      bucketKind,
+      latestEventBucket: null,
+      bucketStart: null,
+      bucketEnd: null,
+      eventGapSeconds: null,
+      note: "No non-zero event bucket exists in the selected window. This can mean no traffic or delayed ingestion; the dashboard query itself succeeded.",
+    };
+  }
+
+  const bucketEndMs = latestMs + bucketWidthMs;
+  const gapMs = Number.isFinite(queryAtMs)
+    ? Math.max(0, queryAtMs - (bucketWidthMs ? bucketEndMs : latestMs))
+    : null;
+
+  return {
+    queryOk: true,
+    queryAt,
+    bucketKind,
+    latestEventBucket: String(latest.bucket || ""),
+    bucketStart: new Date(latestMs).toISOString(),
+    bucketEnd: bucketWidthMs ? new Date(bucketEndMs).toISOString() : null,
+    eventGapSeconds: gapMs == null ? null : Math.floor(gapMs / 1000),
+    note: "EVENT GAP is time since the latest non-zero Cloudflare trend bucket, not a guaranteed ingestion-lag measurement. It also includes periods with no visitors.",
+  };
 }
 
 export function patchPeriod(period) {
@@ -70,6 +136,7 @@ export function patchAnalyticsPayload(payload) {
     };
   }
 
+  patched.freshness = buildFreshness(patched);
   return patched;
 }
 
@@ -83,6 +150,21 @@ export function patchDashboardHtml(html) {
     targetPath: X_PROFILE_TRACKING.path,
     system: true,
   });
+
+  const freshnessRenderer = `const statusEl=document.getElementById("updated");
+  const freshness=data.freshness||{};
+  const fmtFreshTime=(value)=>value?new Intl.DateTimeFormat("ja-JP",{hour:"2-digit",minute:"2-digit"}).format(new Date(value)):"—";
+  const fmtFreshGap=(seconds)=>{if(seconds==null)return "—";const mins=Math.floor(Number(seconds)/60);if(mins<1)return "<1m";if(mins<60)return mins+"m";const hours=Math.floor(mins/60);const rest=mins%60;return hours+"h"+(rest?rest+"m":"");};
+  if(statusEl){
+    const queryTime=fmtFreshTime(freshness.queryAt||data.generatedAt);
+    if(freshness.latestEventBucket){
+      const range=freshness.bucketEnd?fmtFreshTime(freshness.bucketStart)+"–"+fmtFreshTime(freshness.bucketEnd):fmtFreshTime(freshness.bucketStart);
+      statusEl.textContent="QUERY OK "+queryTime+" · LAST EVENT "+range+" · EVENT GAP ≥"+fmtFreshGap(freshness.eventGapSeconds);
+    }else{
+      statusEl.textContent="QUERY OK "+queryTime+" · LAST EVENT なし（選択期間）";
+    }
+    statusEl.title="QUERY OK = Cloudflare API応答成功。EVENT GAPは最新の非ゼロ集計bucketからの経過で、計測遅延だけでなく無流入時間も含みます。";
+  }`;
 
   return String(html)
     .replace(
@@ -104,6 +186,10 @@ export function patchDashboardHtml(html) {
     .replace(
       "eventIndex(campaigns)+",
       'eventIndex(campaigns)+\'<section class="card kpi"><div class="label">X PROFILE ENTRY</div><div class="value">\'+n(c.xProfileEntries||0)+\'</div><div class="delta">専用URL /x/ の入口</div></section>\'+',
+    )
+    .replace(
+      'document.getElementById("updated").textContent=\'更新 \'+new Date(data.generatedAt).toLocaleString("ja-JP");',
+      freshnessRenderer,
     );
 }
 
